@@ -207,6 +207,10 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'token_amount_raw', 'TEXT');
   ensureColumn('dry_run_positions', 'strategy_id', "TEXT DEFAULT 'sniper'");
   ensureColumn('dry_run_positions', 'partial_tp_done', 'INTEGER DEFAULT 0');
+  // trailing_from_entry: arm trailing stop immediately — no fixed TP ceiling, unlimited upside
+  ensureColumn('dry_run_positions', 'trailing_from_entry', 'INTEGER DEFAULT 0');
+  // partial_tp_2_done: second partial take-profit level (deeper profit tier)
+  ensureColumn('dry_run_positions', 'partial_tp_2_done', 'INTEGER DEFAULT 0');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
 
   const defaults = {
@@ -362,18 +366,117 @@ export function initDb() {
     trending_min_swaps: 0,
     trending_max_rug_ratio: 0.5,
     trending_max_bundler_rate: 0.7,
+    min_liquidity_usd: 0,
+    min_hot_level: 0,
+    min_smart_degen_count: 0,
     position_size_sol: 0.05,
     max_open_positions: 5,
     tp_percent: 30,
     sl_percent: -15,
     trailing_enabled: true,
+    trailing_from_entry: false,
     trailing_percent: 10,
+    tiered_trailing: true,
     partial_tp: false,
     partial_tp_at_percent: 0,
     partial_tp_sell_percent: 0,
+    partial_tp_2: false,
+    partial_tp_2_at_percent: 0,
+    partial_tp_2_sell_percent: 0,
     max_hold_ms: 0,
     use_llm: false,
     llm_min_confidence: 0,
+  }), ts);
+
+  // Moon Bag — triple-confirmed signals, rides winners to maximum with tiered profit lock.
+  // trailing_from_entry removes the TP ceiling so positions can 10x+ without auto-exit.
+  // Two partial TPs secure capital; the remaining bag trails with a tightening stop.
+  stratInsert.run('moon_bag', 'Moon Bag', 0, JSON.stringify({
+    entry_mode: 'immediate',
+    min_source_count: 3,          // fee + graduated + trending all required
+    require_fee_claim: true,
+    token_age_max_ms: 3600000,    // fresh launches only
+    min_mcap_usd: 8000,
+    max_mcap_usd: 150000,         // early enough to catch the big move
+    min_fee_claim_sol: 2.0,       // strong fee signal
+    min_gmgn_total_fee_sol: 15,
+    min_holders: 50,
+    max_top20_holder_percent: 65, // some concentration OK for early movers
+    min_saved_wallet_holders: 0,
+    max_ath_distance_pct: 0,
+    min_graduated_volume_usd: 0,
+    trending_min_volume_usd: 2000,
+    trending_min_swaps: 50,
+    trending_max_rug_ratio: 0.25,
+    trending_max_bundler_rate: 0.4,
+    min_liquidity_usd: 5000,      // must be liquid enough to exit
+    min_hot_level: 0,
+    min_smart_degen_count: 0,
+    position_size_sol: 0.1,
+    max_open_positions: 3,
+    // tp_percent is the MINIMUM profit before trailing arms (no hard exit)
+    tp_percent: 50,
+    sl_percent: -22,
+    trailing_enabled: true,
+    trailing_from_entry: true,    // arm trailing immediately — unlimited upside
+    trailing_percent: 22,         // base trail; tightens automatically above 40% PnL
+    tiered_trailing: true,
+    // Sell 25% at +100% — recover ~half the position cost, ride the rest
+    partial_tp: true,
+    partial_tp_at_percent: 100,
+    partial_tp_sell_percent: 25,
+    // Sell another 25% of original at +300% — deep profit tier secured
+    partial_tp_2: true,
+    partial_tp_2_at_percent: 300,
+    partial_tp_2_sell_percent: 25,
+    max_hold_ms: 0,               // no time cap — let winners run
+    use_llm: true,
+    llm_min_confidence: 70,
+  }), ts);
+
+  // Momentum Rocket — catches hot trending tokens with smart-money accumulation.
+  // Uses trailing_from_entry so there is no fixed exit — just follows the momentum.
+  // Tight entry filters ensure quality; tiered trailing locks in gains progressively.
+  stratInsert.run('momentum_rocket', 'Momentum Rocket', 0, JSON.stringify({
+    entry_mode: 'immediate',
+    min_source_count: 1,
+    require_fee_claim: false,
+    token_age_max_ms: 86400000,   // can be up to 1 day old
+    min_mcap_usd: 20000,
+    max_mcap_usd: 500000,
+    min_fee_claim_sol: 0,
+    min_gmgn_total_fee_sol: 0,
+    min_holders: 200,
+    max_top20_holder_percent: 55,
+    min_saved_wallet_holders: 0,
+    max_ath_distance_pct: 0,
+    min_graduated_volume_usd: 0,
+    trending_min_volume_usd: 8000, // strong volume confirmation
+    trending_min_swaps: 120,
+    trending_max_rug_ratio: 0.2,   // strict rug filter
+    trending_max_bundler_rate: 0.3,
+    min_liquidity_usd: 10000,
+    min_hot_level: 1,              // at least "warm" momentum
+    min_smart_degen_count: 2,      // smart money must be accumulating
+    position_size_sol: 0.12,
+    max_open_positions: 2,         // focused — fewer, higher-quality positions
+    tp_percent: 75,                // trailing arms once we're up 75%
+    sl_percent: -18,
+    trailing_enabled: true,
+    trailing_from_entry: true,     // arm trailing at entry — pure momentum play
+    trailing_percent: 18,          // tightens automatically as PnL grows
+    tiered_trailing: true,
+    // Lock in 30% of position at +75% profit
+    partial_tp: true,
+    partial_tp_at_percent: 75,
+    partial_tp_sell_percent: 30,
+    // Lock in another 25% at +250%
+    partial_tp_2: true,
+    partial_tp_2_at_percent: 250,
+    partial_tp_2_sell_percent: 25,
+    max_hold_ms: 0,
+    use_llm: true,
+    llm_min_confidence: 65,
   }), ts);
 }
 
