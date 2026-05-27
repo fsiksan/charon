@@ -35,6 +35,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
   const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
+  const trailingFromEntry = strat.trailing_from_entry ? 1 : 0;
 
   return db.transaction(() => {
     const existing = db.prepare(`
@@ -46,8 +47,9 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       INSERT INTO dry_run_positions (
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
         token_amount_est, high_water_price, high_water_mcap, tp_percent, sl_percent,
-        trailing_enabled, trailing_percent, trailing_armed, llm_decision_id, strategy_id, snapshot_json
-      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        trailing_enabled, trailing_percent, trailing_armed, trailing_from_entry,
+        llm_decision_id, strategy_id, snapshot_json
+      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     `).run(
       candidateId,
       candidate.token.mint,
@@ -63,6 +65,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
       sl,
       trailingEnabled,
       trailingPercent,
+      trailingFromEntry,
       decision.id || null,
       strat.id,
       json({ candidate, decision, reason, strategy: strat.id }),
@@ -89,6 +92,7 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
   const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
   const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
+  const trailingFromEntry = strat.trailing_from_entry ? 1 : 0;
 
   return db.transaction(() => {
     const existing = db.prepare(`
@@ -100,9 +104,9 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
       INSERT INTO dry_run_positions (
         candidate_id, mint, symbol, status, opened_at_ms, size_sol, entry_price, entry_mcap,
         token_amount_est, high_water_price, high_water_mcap, tp_percent, sl_percent,
-        trailing_enabled, trailing_percent, trailing_armed, llm_decision_id,
+        trailing_enabled, trailing_percent, trailing_armed, trailing_from_entry, llm_decision_id,
         execution_mode, entry_signature, token_amount_raw, strategy_id, snapshot_json
-      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'live', ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'live', ?, ?, ?, ?)
     `).run(
       candidateId,
       candidate.token.mint,
@@ -118,6 +122,7 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
       sl,
       trailingEnabled,
       trailingPercent,
+      trailingFromEntry,
       decision.id || null,
       swap.signature,
       swap.outputAmount || null,

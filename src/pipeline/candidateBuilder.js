@@ -37,10 +37,13 @@ export function filterCandidate(candidate) {
   const savedCount = candidate.savedWalletExposure.holderCount;
   const feeSol = candidate.feeClaim?.distributedSol;
   const holderCount = Number(candidate.metrics.holderCount || 0);
+  const liquidityUsd = Number(candidate.metrics.liquidityUsd || 0);
   const trendingVolume = Number(candidate.trending?.volume ?? 0);
   const trendingSwaps = Number(candidate.trending?.swaps ?? 0);
   const rugRatio = Number(candidate.trending?.rug_ratio ?? 0);
   const bundlerRate = Number(candidate.trending?.bundler_rate ?? 0);
+  const hotLevel = Number(candidate.metrics.trendingHotLevel ?? 0);
+  const smartDegenCount = Number(candidate.metrics.trendingSmartDegenCount ?? 0);
 
   // Fee claim check
   if (candidate.feeClaim) {
@@ -68,6 +71,11 @@ export function filterCandidate(candidate) {
   // Graduated volume — only enforce when the token actually has graduated data
   if (strat.min_graduated_volume_usd > 0 && candidate.graduation && gradVolume < strat.min_graduated_volume_usd) {
     failures.push(`graduated volume: ${gradVolume} < ${strat.min_graduated_volume_usd}`);
+  }
+
+  // Liquidity check — ensures exits are viable
+  if (strat.min_liquidity_usd > 0 && liquidityUsd < strat.min_liquidity_usd) {
+    failures.push(`liquidity: $${liquidityUsd.toFixed(0)} < min $${strat.min_liquidity_usd}`);
   }
 
   // Holder count
@@ -109,6 +117,14 @@ export function filterCandidate(candidate) {
     }
     if (candidate.trending.is_wash_trading === true || candidate.trending.is_wash_trading === 1) {
       failures.push('trending wash trading');
+    }
+    // Hot level — momentum strength signal (0=cold, 1=warm, 2=hot, 3=very hot)
+    if (strat.min_hot_level > 0 && hotLevel < strat.min_hot_level) {
+      failures.push(`hot level: ${hotLevel} < min ${strat.min_hot_level}`);
+    }
+    // Smart degen count — number of profitable wallets accumulating
+    if (strat.min_smart_degen_count > 0 && smartDegenCount < strat.min_smart_degen_count) {
+      failures.push(`smart degen count: ${smartDegenCount} < min ${strat.min_smart_degen_count}`);
     }
   }
 
