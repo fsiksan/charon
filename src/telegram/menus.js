@@ -282,6 +282,7 @@ export function strategyMenuText() {
     strat.partial_tp ? `Partial TP: ${strat.partial_tp_sell_percent}% at ${fmtPct(strat.partial_tp_at_percent)}` : null,
     strat.max_hold_ms > 0 ? `Max hold: ${Math.round(strat.max_hold_ms / 60000)}m` : null,
     strat.use_llm ? `LLM: yes (min ${strat.llm_min_confidence}%)` : 'LLM: no (rule-based)',
+    `Slippage — buy: ${strat.buy_slippage_bps ?? 300} bps (${((strat.buy_slippage_bps ?? 300) / 100).toFixed(1)}%) · sell: ${strat.sell_slippage_bps ?? 1000} bps (${((strat.sell_slippage_bps ?? 1000) / 100).toFixed(1)}%)`,
     '',
     ...all.map(s => `${s.enabled ? '▶' : '○'} ${s.name}`),
   ].filter(Boolean).join('\n');
@@ -349,6 +350,10 @@ export function strategyKeyboard() {
     ],
     [
       { text: `Partial At ${strat.partial_tp_at_percent}%`, callback_data: 'stratinput:partial_tp_at_percent' },
+    ],
+    [
+      { text: `Buy Slip ${strat.buy_slippage_bps ?? 300}bps`, callback_data: 'stratcfg:buy_slippage_bps' },
+      { text: `Sell Slip ${strat.sell_slippage_bps ?? 1000}bps`, callback_data: 'stratcfg:sell_slippage_bps' },
     ],
   ];
   return {

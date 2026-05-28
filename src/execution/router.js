@@ -1,10 +1,10 @@
 import { now, json } from '../utils.js';
 import { numSetting, boolSetting } from '../db/settings.js';
 import { db } from '../db/connection.js';
-import { WSOL_MINT, LIVE_MIN_SOL_RESERVE_LAMPORTS } from '../config.js';
+import { WSOL_MINT, LIVE_MIN_SOL_RESERVE_LAMPORTS, JUPITER_BUY_SLIPPAGE_BPS, JUPITER_SELL_SLIPPAGE_BPS } from '../config.js';
 import { escapeHtml, fmtSol } from '../format.js';
 import { executeJupiterSwap, liveWalletBalanceLamports, fetchLiveTokenBalance } from '../liveExecutor.js';
-import { activeStrategy } from '../db/settings.js';
+import { activeStrategy, strategyById } from '../db/settings.js';
 import { createLivePosition, canOpenMorePositions, openPositionCount } from '../db/positions.js';
 import { intentById } from '../db/intents.js';
 import { logDecisionEvent } from '../db/decisions.js';
@@ -26,6 +26,7 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
     inputMint: WSOL_MINT,
     outputMint: selectedRow.candidate.token.mint,
     amount: amountLamports,
+    slippageBps: strat.buy_slippage_bps ?? JUPITER_BUY_SLIPPAGE_BPS,
   });
   if (!swap.outputAmount) {
     swap.outputAmount = await fetchLiveTokenBalance(selectedRow.candidate.token.mint) || swap.outputAmount;
@@ -48,10 +49,12 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
 export async function executeLiveSell(position, reason) {
   const amount = position.token_amount_raw || position.token_amount_est;
   if (!amount || Number(amount) <= 0) throw new Error('Live position has no token amount to sell.');
+  const strat = strategyById(position.strategy_id);
   return executeJupiterSwap({
     inputMint: position.mint,
     outputMint: WSOL_MINT,
     amount,
+    slippageBps: strat?.sell_slippage_bps ?? JUPITER_SELL_SLIPPAGE_BPS,
   });
 }
 
@@ -88,6 +91,7 @@ export async function executeConfirmedIntent(chatId, intentId) {
       inputMint: WSOL_MINT,
       outputMint: freshRow.candidate.token.mint,
       amount: amountLamports,
+      slippageBps: strat.buy_slippage_bps ?? JUPITER_BUY_SLIPPAGE_BPS,
     });
     if (!swap.outputAmount) {
       swap.outputAmount = await fetchLiveTokenBalance(freshRow.candidate.token.mint) || swap.outputAmount;

@@ -182,12 +182,15 @@ const STRAT_PRESETS = {
   min_gmgn_total_fee_sol: [0, 3, 5, 10, 20],
   max_ath_distance_pct: [0, -20, -30, -40, -50, -60],
   token_age_max_ms: [0, 1800000, 3600000, 7200000, 14400000, 43200000, 86400000],
+  buy_slippage_bps: [100, 200, 300, 500, 800, 1000],
+  sell_slippage_bps: [300, 500, 800, 1000, 1500, 2000],
 };
 
 function formatStratValue(key, value) {
   if (key === 'max_hold_ms' || key === 'token_age_max_ms') {
     return value > 0 ? `${Math.round(value / 60000)}m` : 'off';
   }
+  if (key.includes('slippage_bps')) return `${value} bps (${(value / 100).toFixed(1)}%)`;
   if (key.includes('percent') || key.includes('pct')) return `${value}%`;
   if (key.includes('sol')) return `${value} SOL`;
   if (key.includes('usd')) return value > 0 ? `$${value.toLocaleString()}` : 'off';
