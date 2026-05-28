@@ -20,6 +20,8 @@ import {
   positionButtons,
   strategyMenuText,
   strategyKeyboard,
+  recapText,
+  recapKeyboard,
 } from './menus.js';
 import { sendTelegram, sendBatch, sendPositionOpen } from './send.js';
 import { candidateSummary, formatPosition } from './format.js';
@@ -44,7 +46,7 @@ export async function handleMessage(msg) {
     if (!id) {
       return bot.sendMessage(chatId, strategyMenuText(), { parse_mode: 'HTML', ...strategyKeyboard() });
     }
-    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen'];
+    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen', 'moon_bag', 'momentum_rocket'];
     if (!valid.includes(id)) {
       return bot.sendMessage(chatId, `Unknown strategy. Valid: ${valid.join(', ')}`);
     }
@@ -74,6 +76,9 @@ export async function handleMessage(msg) {
     }
     updateStrategyConfig(id, newConfig);
     return bot.sendMessage(chatId, `Updated ${id}.${key} = ${value}\n\n${strategyMenuText()}`, { parse_mode: 'HTML' });
+  }
+  if (text.startsWith('/recap')) {
+    return bot.sendMessage(chatId, recapText(), { parse_mode: 'HTML', disable_web_page_preview: true, ...recapKeyboard() });
   }
   if (text.startsWith('/pnl')) return sendPnl(chatId);
   if (text.startsWith('/learn')) {
@@ -244,6 +249,7 @@ export function setupTelegram() {
     { command: 'positions', description: 'Show dry-run positions' },
     { command: 'candidate', description: 'Show candidate by mint' },
     { command: 'filters', description: 'Show filters' },
+    { command: 'recap', description: 'Show dry-run PnL recap (all time + 24h)' },
     { command: 'pnl', description: 'Show saved-wallet PnL' },
     { command: 'learn', description: 'Run manual learning report' },
     { command: 'lessons', description: 'Show active screening lessons' },

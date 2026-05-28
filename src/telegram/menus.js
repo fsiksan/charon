@@ -1,6 +1,6 @@
 import { escapeHtml, fmtPct, fmtSol, fmtUsd, short } from '../format.js';
 import { numSetting, boolSetting, setting, activeStrategy, allStrategies } from '../db/settings.js';
-import { openPositionCount, tradingMode, allPositions } from '../db/positions.js';
+import { openPositionCount, tradingMode, allPositions, getRecapStats } from '../db/positions.js';
 import { savedWallets } from '../enrichment/wallets.js';
 import { gmgnStatusText } from '../enrichment/gmgn.js';
 import { formatPosition } from './format.js';
@@ -20,6 +20,78 @@ export function menuKeyboard() {
           { text: 'Positions', callback_data: 'menu:positions' },
           { text: 'PnL', callback_data: 'menu:pnl' },
         ],
+        [
+          { text: '📊 Recap', callback_data: 'menu:recap' },
+        ],
+      ],
+    },
+  };
+}
+
+export function recapText() {
+  const { allTime, last24h, openPositions: open } = getRecapStats();
+  const strat = activeStrategy();
+
+  function fmtStats(s, label) {
+    if (s.closed === 0 && s.open === 0) return `${label}\nNo trades yet.`;
+    const winRateLine = s.closed > 0
+      ? `Win rate: <b>${s.winRate.toFixed(1)}%</b> (${s.wins}W / ${s.losses}L)`
+      : 'Win rate: —';
+    const avgLine = s.closed > 0 ? `Avg PnL: <b>${s.avgPnlPct >= 0 ? '+' : ''}${s.avgPnlPct.toFixed(1)}%</b> per trade` : '';
+    const totalLine = s.closed > 0
+      ? `Total: <b>${s.totalPnlPct >= 0 ? '+' : ''}${s.totalPnlPct.toFixed(1)}%</b> · <b>${s.totalPnlSol >= 0 ? '+' : ''}${s.totalPnlSol.toFixed(4)} SOL</b>`
+      : '';
+    return [label, `Trades: ${s.closed} closed, ${s.open} open`, winRateLine, avgLine, totalLine].filter(Boolean).join('\n');
+  }
+
+  function fmtReasons(byReason, total) {
+    if (!total) return '';
+    const order = ['SL', 'TRAILING_TP', 'TP', 'PARTIAL_TP', 'PARTIAL_TP2', 'MAX_HOLD', 'MANUAL', 'TIME_EXIT', 'UNKNOWN'];
+    const parts = order
+      .filter(k => byReason[k] > 0)
+      .map(k => `${k}: ${(byReason[k] / total * 100).toFixed(0)}%`);
+    return parts.join(' | ');
+  }
+
+  const bestLines = allTime.best.length
+    ? allTime.best.map((p, i) => {
+        const pnl = Number(p.pnl_percent || 0);
+        const icon = pnl > 0 ? '🟢' : '🔴';
+        return `${icon} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}% ${escapeHtml(p.symbol || p.mint?.slice(0, 6) || '?')} (${p.exit_reason || '?'})`;
+      })
+    : ['—'];
+
+  const reasonsLine = fmtReasons(allTime.byReason, allTime.closed);
+  const openLine = open.length
+    ? open.map(p => `• ${escapeHtml(p.symbol || p.mint?.slice(0, 6))} #${p.id}`).join('\n')
+    : 'None';
+
+  return [
+    '📊 <b>Dry-run Recap</b>',
+    '',
+    fmtStats(allTime, '── All Time ──'),
+    '',
+    fmtStats(last24h, '── Last 24h ──'),
+    '',
+    `── Open Positions ──\n${openLine}`,
+    '',
+    `── Best Trades (All Time) ──\n${bestLines.join('\n')}`,
+    '',
+    reasonsLine ? `── Exit Reasons ──\n${reasonsLine}` : null,
+    '',
+    `Strategy: <b>${escapeHtml(strat.name)}</b>`,
+  ].filter(v => v !== null).join('\n');
+}
+
+export function recapKeyboard() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: 'Positions', callback_data: 'menu:positions' },
+          { text: 'Refresh', callback_data: 'menu:recap' },
+        ],
+        [{ text: 'Back', callback_data: 'menu:main' }],
       ],
     },
   };
