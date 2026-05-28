@@ -1,15 +1,16 @@
 /**
- * simulate.js — Monte Carlo strategy comparison for Solana meme coin trading
+ * simulate.js — Monte Carlo & 7-day portfolio simulation for Charon strategies
  *
- * Generates realistic meme token price paths (6 archetypes), applies each
- * strategy's full exit logic (SL, fixed TP, trailing stop, tiered trailing,
- * partial TPs), and compares results across 10,000 simulations per strategy.
+ * Part 1: Per-trade analysis (10 000 trades/strategy) — quick sanity check
+ * Part 2: 7-day portfolio simulation (500 runs/strategy, 2 SOL starting capital)
+ *         Models signal arrival rate, capital constraints, concurrent positions,
+ *         compounding, daily equity curve, and risk metrics.
  *
  * Run with: node simulate.js
  * No API keys or database required — fully self-contained.
  */
 
-// ─── PRNG (mulberry32 — fast, seedable) ─────────────────────────────────────
+// ─── PRNG (mulberry32 — fast, seedable) ──────────────────────────────────────
 
 function makePrng(seed) {
   let s = (seed + 1) >>> 0;
@@ -18,7 +19,6 @@ function makePrng(seed) {
     return s / 0x100000000;
   };
 }
-
 function makeRandNorm(rand) {
   return function randNorm() {
     let u;
@@ -27,255 +27,153 @@ function makeRandNorm(rand) {
   };
 }
 
-// ─── Utility ─────────────────────────────────────────────────────────────────
+// ─── Utilities ────────────────────────────────────────────────────────────────
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function lerp(a, b, t)    { return a + (b - a) * clamp(t, 0, 1); }
-
-function pct(n, decimals = 1) {
-  const sign = n >= 0 ? '+' : '';
-  return `${sign}${n.toFixed(decimals)}%`;
+function sol(n)  { return n.toFixed(4); }
+function pct(n, d = 1) { const s = n >= 0 ? '+' : ''; return `${s}${n.toFixed(d)}%`; }
+function pad(s, w, r = false) { s = String(s); return r ? s.padEnd(w) : s.padStart(w); }
+function bar(v, max, w = 30) {
+  const f = Math.round(clamp(v / max, 0, 1) * w);
+  return '█'.repeat(f) + '░'.repeat(w - f);
 }
 
-function pad(s, width, right = false) {
-  s = String(s);
-  return right ? s.padEnd(width) : s.padStart(width);
-}
-
-// ─── Price path archetypes ───────────────────────────────────────────────────
-//
-// Each archetype returns an array of price multipliers (relative to entry = 1.0)
-// at 1-minute intervals, up to 720 steps (12 hours).
-// The shapes model the most common Solana meme-coin behaviours.
+// ─── Price path archetypes ────────────────────────────────────────────────────
+// 1-minute candles up to 720 steps (12 h). price[0] = 1.0 (entry).
 
 function generatePricePath(archetype, peakMultiple, rand, randNorm) {
-  const STEPS = 720;
-  const path = new Float64Array(STEPS + 1);
+  const N = 720;
+  const path = new Float64Array(N + 1);
   path[0] = 1.0;
+  let p = 1.0;
 
   switch (archetype) {
     case 'immediate_rug': {
-      // Tiny pump (+5–20%) then hard crash to 2–10% within 20–60 min
-      const peakAt  = 3 + Math.floor(rand() * 12);
-      const peakPx  = 1.0 + rand() * 0.20;
-      const rugAt   = peakAt + 10 + Math.floor(rand() * 30);
-      const rugFloor = 0.02 + rand() * 0.08;
-      for (let t = 1; t <= STEPS; t++) {
-        let p;
-        if (t <= peakAt)  p = lerp(1.0, peakPx, t / peakAt);
-        else if (t <= rugAt) p = lerp(peakPx, rugFloor, (t - peakAt) / (rugAt - peakAt));
-        else p = rugFloor * (1 + (rand() - 0.5) * 0.08);
+      const peakAt = 3 + Math.floor(rand() * 12);
+      const peakPx = 1.0 + rand() * 0.20;
+      const rugAt  = peakAt + 10 + Math.floor(rand() * 30);
+      const floor  = 0.02 + rand() * 0.08;
+      for (let t = 1; t <= N; t++) {
+        if      (t <= peakAt) p = lerp(1.0, peakPx, t / peakAt);
+        else if (t <= rugAt)  p = lerp(peakPx, floor, (t - peakAt) / (rugAt - peakAt));
+        else    p = floor * (1 + (rand() - 0.5) * 0.08);
         path[t] = Math.max(p, 0.001);
       }
       break;
     }
-
     case 'slow_bleed': {
-      // Small early pump (+10–50%), gradual decline over hours
-      const peakAt  = 10 + Math.floor(rand() * 60);
-      const peakPx  = 1.0 + rand() * 0.5;
-      const settle  = 0.15 + rand() * 0.35;
-      for (let t = 1; t <= STEPS; t++) {
-        let p;
+      const peakAt = 10 + Math.floor(rand() * 60);
+      const peakPx = 1.0 + rand() * 0.5;
+      const settle = 0.15 + rand() * 0.35;
+      for (let t = 1; t <= N; t++) {
         if (t <= peakAt) p = lerp(1.0, peakPx, t / peakAt);
         else {
-          const decay = (t - peakAt) / (STEPS - peakAt);
-          p = lerp(peakPx, settle, Math.pow(decay, 0.6)) + randNorm() * 0.025;
+          const d = (t - peakAt) / (N - peakAt);
+          p = lerp(peakPx, settle, Math.pow(d, 0.6)) + randNorm() * 0.025;
         }
         path[t] = Math.max(p, 0.01);
       }
       break;
     }
-
     case 'pump_dump': {
-      // Strong pump to peak, then dumps back to 25–60% of entry
-      const peak    = peakMultiple; // 1.5–4x
-      const peakAt  = 20 + Math.floor(rand() * 90);
-      const dumpDur = 20 + Math.floor(rand() * 60);
-      const floor   = 0.25 + rand() * 0.35;
-      for (let t = 1; t <= STEPS; t++) {
-        let p;
-        if (t <= peakAt) {
+      const peak   = peakMultiple;
+      const peakAt = 20 + Math.floor(rand() * 90);
+      const dumpD  = 20 + Math.floor(rand() * 60);
+      const floor  = 0.25 + rand() * 0.35;
+      for (let t = 1; t <= N; t++) {
+        if (t <= peakAt)
           p = 1.0 + (peak - 1.0) * Math.pow(t / peakAt, 0.65) + randNorm() * 0.015;
-        } else if (t <= peakAt + dumpDur) {
-          p = lerp(peak, floor, Math.pow((t - peakAt) / dumpDur, 0.5)) + randNorm() * 0.02;
-        } else {
+        else if (t <= peakAt + dumpD)
+          p = lerp(peak, floor, Math.pow((t - peakAt) / dumpD, 0.5)) + randNorm() * 0.02;
+        else
           p = floor * (1 + (rand() - 0.5) * 0.12);
-        }
         path[t] = Math.max(p, 0.01);
       }
       break;
     }
-
     case 'runner': {
-      // Pump to peak with one major retracement, stays elevated
-      const peak    = peakMultiple; // 2–8x
+      const peak    = peakMultiple;
       const peakAt  = 60 + Math.floor(rand() * 180);
-      const retrace = 0.20 + rand() * 0.30; // 20–50% retrace from peak
-      const retraceAt = peakAt + 20 + Math.floor(rand() * 80);
+      const retrace = 0.20 + rand() * 0.30;
+      const retAt   = peakAt + 20 + Math.floor(rand() * 80);
       const settle  = peak * (1 - retrace) * (0.75 + rand() * 0.25);
-      for (let t = 1; t <= STEPS; t++) {
-        let p;
-        if (t <= peakAt) {
+      for (let t = 1; t <= N; t++) {
+        if (t <= peakAt)
           p = 1.0 + (peak - 1.0) * Math.pow(t / peakAt, 0.55) + randNorm() * 0.025;
-        } else if (t <= retraceAt) {
-          p = lerp(peak, peak * (1 - retrace), (t - peakAt) / (retraceAt - peakAt)) + randNorm() * 0.03;
-        } else {
+        else if (t <= retAt)
+          p = lerp(peak, peak * (1 - retrace), (t - peakAt) / (retAt - peakAt)) + randNorm() * 0.03;
+        else
           p = settle + randNorm() * 0.04;
-        }
         path[t] = Math.max(p, 0.1);
       }
       break;
     }
-
     case 'moon': {
-      // Two-leg pump: major rally, retrace, second push even higher
-      const p1      = peakMultiple * (0.5 + rand() * 0.3); // first leg peak
-      const p1At    = 30 + Math.floor(rand() * 120);
-      const retrace = 0.25 + rand() * 0.30;
-      const retAt   = p1At + 30 + Math.floor(rand() * 90);
-      const p2      = peakMultiple * (1 + rand() * 0.5);   // second leg higher
-      const p2At    = retAt + 60 + Math.floor(rand() * 120);
-      const settleF = p2 * (0.55 + rand() * 0.3);
-      for (let t = 1; t <= STEPS; t++) {
-        let p;
-        const bottom = p1 * (1 - retrace);
-        if (t <= p1At) {
+      const p1   = peakMultiple * (0.5 + rand() * 0.3);
+      const p1At = 30 + Math.floor(rand() * 120);
+      const ret  = 0.25 + rand() * 0.30;
+      const retAt = p1At + 30 + Math.floor(rand() * 90);
+      const p2   = peakMultiple * (1 + rand() * 0.5);
+      const p2At = retAt + 60 + Math.floor(rand() * 120);
+      const sett = p2 * (0.55 + rand() * 0.3);
+      const bot  = p1 * (1 - ret);
+      for (let t = 1; t <= N; t++) {
+        if (t <= p1At)
           p = 1.0 + (p1 - 1.0) * Math.pow(t / p1At, 0.45) + randNorm() * 0.03;
-        } else if (t <= retAt) {
-          p = lerp(p1, bottom, (t - p1At) / (retAt - p1At)) + randNorm() * 0.03;
-        } else if (t <= p2At) {
-          p = lerp(bottom, p2, Math.pow((t - retAt) / (p2At - retAt), 0.45)) + randNorm() * 0.04;
-        } else {
-          p = settleF + randNorm() * 0.05;
-        }
+        else if (t <= retAt)
+          p = lerp(p1, bot, (t - p1At) / (retAt - p1At)) + randNorm() * 0.03;
+        else if (t <= p2At)
+          p = lerp(bot, p2, Math.pow((t - retAt) / (p2At - retAt), 0.45)) + randNorm() * 0.04;
+        else
+          p = sett + randNorm() * 0.05;
         path[t] = Math.max(p, 0.1);
       }
       break;
     }
-
     case 'flat': {
-      // Sideways with ±12% drift — mostly time-decay for meme coins
-      for (let t = 1; t <= STEPS; t++) {
-        path[t] = Math.max(1.0 + randNorm() * 0.04 * Math.sqrt(t / 30) - t * 0.0003, 0.1);
+      for (let t = 1; t <= N; t++) {
+        p = Math.max(1.0 + randNorm() * 0.04 * Math.sqrt(t / 30) - t * 0.0003, 0.1);
+        path[t] = p;
       }
       break;
     }
   }
-
   return path;
 }
 
-// ─── Dynamic trailing stop (mirrors execution/positions.js) ─────────────────
+// ─── Dynamic trailing (mirrors execution/positions.js) ───────────────────────
 
-function getDynamicTrailing(basePercent, highWaterPnl) {
-  const base = Math.abs(basePercent);
-  if (highWaterPnl >= 500) return Math.max(base * 0.45, 8);
-  if (highWaterPnl >= 300) return Math.max(base * 0.55, 9);
-  if (highWaterPnl >= 150) return Math.max(base * 0.65, 10);
-  if (highWaterPnl >= 75)  return Math.max(base * 0.75, 11);
-  if (highWaterPnl >= 40)  return Math.max(base * 0.85, 12);
-  return base;
+function getDynamicTrailing(base, hwPnl) {
+  const b = Math.abs(base);
+  if (hwPnl >= 500) return Math.max(b * 0.45, 8);
+  if (hwPnl >= 300) return Math.max(b * 0.55, 9);
+  if (hwPnl >= 150) return Math.max(b * 0.65, 10);
+  if (hwPnl >= 75)  return Math.max(b * 0.75, 11);
+  if (hwPnl >= 40)  return Math.max(b * 0.85, 12);
+  return b;
 }
 
-// ─── Trade simulator ─────────────────────────────────────────────────────────
-//
-// Applies the strategy's exit logic to each price step.
-// Tracks partial TP fraction accounting for weighted PnL.
-
-function simulateTrade(strategy, pricePath) {
-  const {
-    tp_percent, sl_percent,
-    trailing_enabled, trailing_from_entry, trailing_percent, tiered_trailing,
-    partial_tp, partial_tp_at_percent, partial_tp_sell_percent,
-    partial_tp_2, partial_tp_2_at_percent, partial_tp_2_sell_percent,
-  } = strategy;
-
-  let highWater      = 1.0;
-  let trailingArmed  = Boolean(trailing_from_entry);
-  let partialTpDone  = false;
-  let partialTp2Done = false;
-  let lockedPnl      = 0;    // weighted PnL from already-sold partial slices
-  let remaining      = 1.0;  // fraction of original position still open
-
-  for (let t = 0; t < pricePath.length; t++) {
-    const price = pricePath[t];
-    const pnl   = (price - 1.0) * 100;
-
-    if (price > highWater) highWater = price;
-    const hwPnl = (highWater - 1.0) * 100;
-
-    // Arm trailing when TP threshold crossed (unless already armed from entry)
-    if (!trailingArmed && trailing_enabled && pnl >= tp_percent) {
-      trailingArmed = true;
-    }
-
-    // First partial TP — sells partial_tp_sell_percent% of original position
-    if (partial_tp && !partialTpDone && pnl >= partial_tp_at_percent) {
-      partialTpDone = true;
-      const sellFrac = partial_tp_sell_percent / 100;
-      lockedPnl += sellFrac * pnl;
-      remaining -= sellFrac;
-    }
-
-    // Second partial TP — sells partial_tp_2_sell_percent% of REMAINING tokens
-    if (partial_tp_2 && !partialTp2Done && pnl >= partial_tp_2_at_percent) {
-      partialTp2Done = true;
-      const sellFrac = (partial_tp_2_sell_percent / 100) * remaining;
-      lockedPnl += sellFrac * pnl;
-      remaining -= sellFrac;
-    }
-
-    // Hard stop-loss
-    if (pnl <= sl_percent) {
-      return result('SL', lockedPnl + remaining * pnl, t, partialTpDone, partialTp2Done, hwPnl);
-    }
-
-    // Fixed TP (no trailing enabled)
-    if (!trailing_enabled && pnl >= tp_percent) {
-      return result('TP', lockedPnl + remaining * pnl, t, partialTpDone, partialTp2Done, hwPnl);
-    }
-
-    // Trailing stop
-    if (trailingArmed && trailing_enabled) {
-      const trail    = tiered_trailing ? getDynamicTrailing(trailing_percent, hwPnl) : Math.abs(trailing_percent);
-      const dropPct  = (price / highWater - 1) * 100;
-      if (dropPct <= -trail) {
-        return result('TRAILING_TP', lockedPnl + remaining * pnl, t, partialTpDone, partialTp2Done, hwPnl);
-      }
-    }
-  }
-
-  // Simulation ended without exit — close at last price
-  const lastPnl = (pricePath[pricePath.length - 1] - 1.0) * 100;
-  const hwPnl   = (highWater - 1.0) * 100;
-  return result('TIME_EXIT', lockedPnl + remaining * lastPnl, pricePath.length - 1, partialTpDone, partialTp2Done, hwPnl);
-}
-
-function result(reason, pnl, t, pt1, pt2, hwPnl) {
-  return { reason, pnl, t, partialTp: pt1, partialTp2: pt2, hwPnl };
-}
-
-// ─── Strategy configurations ─────────────────────────────────────────────────
+// ─── Strategy configs ─────────────────────────────────────────────────────────
 
 const STRATEGIES = {
   sniper: {
     label: 'Sniper',
-    tp_percent: 50, sl_percent: -25,
+    tp_percent: 50,  sl_percent: -25,
     trailing_enabled: true,  trailing_from_entry: false,
     trailing_percent: 20,    tiered_trailing: false,
-    partial_tp: false, partial_tp_at_percent: 0,  partial_tp_sell_percent: 0,
+    partial_tp: false, partial_tp_at_percent: 0, partial_tp_sell_percent: 0,
     partial_tp_2: false, partial_tp_2_at_percent: 0, partial_tp_2_sell_percent: 0,
-    position_size_sol: 0.10,
+    position_size_sol: 0.10, max_open_positions: 3,
   },
   dip_buy: {
     label: 'Dip Buy',
-    tp_percent: 30, sl_percent: -20,
+    tp_percent: 30,  sl_percent: -20,
     trailing_enabled: true,  trailing_from_entry: false,
     trailing_percent: 15,    tiered_trailing: false,
-    partial_tp: false, partial_tp_at_percent: 0,  partial_tp_sell_percent: 0,
+    partial_tp: false, partial_tp_at_percent: 0, partial_tp_sell_percent: 0,
     partial_tp_2: false, partial_tp_2_at_percent: 0, partial_tp_2_sell_percent: 0,
-    position_size_sol: 0.05,
+    position_size_sol: 0.05, max_open_positions: 3,
   },
   smart_money: {
     label: 'Smart Money',
@@ -284,361 +182,470 @@ const STRATEGIES = {
     trailing_percent: 0,     tiered_trailing: false,
     partial_tp: true, partial_tp_at_percent: 100, partial_tp_sell_percent: 50,
     partial_tp_2: false, partial_tp_2_at_percent: 0, partial_tp_2_sell_percent: 0,
-    position_size_sol: 0.10,
+    position_size_sol: 0.10, max_open_positions: 3,
   },
   degen: {
     label: 'Degen',
-    tp_percent: 30, sl_percent: -15,
+    tp_percent: 30,  sl_percent: -15,
     trailing_enabled: true,  trailing_from_entry: false,
     trailing_percent: 10,    tiered_trailing: false,
-    partial_tp: false, partial_tp_at_percent: 0,  partial_tp_sell_percent: 0,
+    partial_tp: false, partial_tp_at_percent: 0, partial_tp_sell_percent: 0,
     partial_tp_2: false, partial_tp_2_at_percent: 0, partial_tp_2_sell_percent: 0,
-    position_size_sol: 0.05,
+    position_size_sol: 0.05, max_open_positions: 5,
   },
   moon_bag: {
     label: 'Moon Bag',
-    tp_percent: 50, sl_percent: -22,
+    tp_percent: 50,  sl_percent: -22,
     trailing_enabled: true,  trailing_from_entry: true,
     trailing_percent: 22,    tiered_trailing: true,
     partial_tp: true, partial_tp_at_percent: 100, partial_tp_sell_percent: 25,
     partial_tp_2: true, partial_tp_2_at_percent: 300, partial_tp_2_sell_percent: 25,
-    position_size_sol: 0.10,
+    position_size_sol: 0.10, max_open_positions: 3,
   },
   momentum_rocket: {
     label: 'Momentum Rocket',
-    tp_percent: 75, sl_percent: -18,
+    tp_percent: 75,  sl_percent: -18,
     trailing_enabled: true,  trailing_from_entry: true,
     trailing_percent: 18,    tiered_trailing: true,
-    partial_tp: true, partial_tp_at_percent: 75,  partial_tp_sell_percent: 30,
+    partial_tp: true, partial_tp_at_percent: 75, partial_tp_sell_percent: 30,
     partial_tp_2: true, partial_tp_2_at_percent: 250, partial_tp_2_sell_percent: 25,
-    position_size_sol: 0.12,
+    position_size_sol: 0.12, max_open_positions: 2,
   },
 };
 
-// ─── Token archetype distributions per strategy ───────────────────────────────
-//
-// Better entry filters → fewer rugs, more runners/moons.
-// Probabilities reflect the expected quality of tokens passing each strategy's filters.
-//
-// Archetypes: immediate_rug, slow_bleed, pump_dump, runner, moon, flat
+// ─── Archetype distributions per strategy ────────────────────────────────────
 
 const ARCHETYPE_DISTS = {
-  sniper: {
-    // fee+graduated 2-source, tight mcap ($7k–$200k)
-    // Fee-claim is a strong quality signal — filters most rugs
-    immediate_rug: 0.20, slow_bleed: 0.20, pump_dump: 0.30,
-    runner: 0.22, moon: 0.06, flat: 0.02,
-  },
-  dip_buy: {
-    // Buys at ATH-40% dip — token already survived the initial launch
-    // Almost no immediate rugs; but many are dead-cat bounces (pump_dump)
-    immediate_rug: 0.04, slow_bleed: 0.28, pump_dump: 0.36,
-    runner: 0.24, moon: 0.06, flat: 0.02,
-  },
-  smart_money: {
-    // ≥1000 holders, ≥$5k volume, strict rug ratio — established tokens
-    // Lower rug rate but mcap already elevated → less explosive upside
-    immediate_rug: 0.12, slow_bleed: 0.22, pump_dump: 0.29,
-    runner: 0.27, moon: 0.07, flat: 0.03,
-  },
-  degen: {
-    // Single-source, loose filters — catches anything
-    immediate_rug: 0.44, slow_bleed: 0.22, pump_dump: 0.20,
-    runner: 0.10, moon: 0.02, flat: 0.02,
-  },
-  moon_bag: {
-    // Triple signal (fee+graduated+trending) + liquidity filter
-    // Very strict: far fewer rugs, much higher runner/moon rate
-    immediate_rug: 0.10, slow_bleed: 0.17, pump_dump: 0.27,
-    runner: 0.29, moon: 0.13, flat: 0.04,
-  },
-  momentum_rocket: {
-    // hot_level≥1 + smart_degen_count≥2 + volume + swaps filters
-    // Smart-degen wallets accumulating = strong momentum signal
-    immediate_rug: 0.16, slow_bleed: 0.18, pump_dump: 0.27,
-    runner: 0.28, moon: 0.08, flat: 0.03,
-  },
+  sniper:           { immediate_rug: 0.20, slow_bleed: 0.20, pump_dump: 0.30, runner: 0.22, moon: 0.06, flat: 0.02 },
+  dip_buy:          { immediate_rug: 0.04, slow_bleed: 0.28, pump_dump: 0.36, runner: 0.24, moon: 0.06, flat: 0.02 },
+  smart_money:      { immediate_rug: 0.12, slow_bleed: 0.22, pump_dump: 0.29, runner: 0.27, moon: 0.07, flat: 0.03 },
+  degen:            { immediate_rug: 0.44, slow_bleed: 0.22, pump_dump: 0.20, runner: 0.10, moon: 0.02, flat: 0.02 },
+  moon_bag:         { immediate_rug: 0.10, slow_bleed: 0.17, pump_dump: 0.27, runner: 0.29, moon: 0.13, flat: 0.04 },
+  momentum_rocket:  { immediate_rug: 0.16, slow_bleed: 0.18, pump_dump: 0.27, runner: 0.28, moon: 0.08, flat: 0.03 },
 };
 
-// Peak multiples per archetype per strategy (earlier mcap range = more upside)
 const PEAK_RANGES = {
-  // [minPeak, maxPeak] as price multipliers
-  sniper:           { pump_dump: [1.5, 4.0], runner: [2.5, 9.0],  moon: [6.0,  25.0] },
-  dip_buy:          { pump_dump: [1.4, 3.0], runner: [2.0, 7.0],  moon: [4.0,  18.0] },
-  smart_money:      { pump_dump: [1.3, 3.0], runner: [2.0, 6.0],  moon: [4.0,  15.0] },
-  degen:            { pump_dump: [1.4, 3.5], runner: [2.0, 8.0],  moon: [5.0,  20.0] },
+  sniper:           { pump_dump: [1.5, 4.0], runner: [2.5,  9.0], moon: [6.0,  25.0] },
+  dip_buy:          { pump_dump: [1.4, 3.0], runner: [2.0,  7.0], moon: [4.0,  18.0] },
+  smart_money:      { pump_dump: [1.3, 3.0], runner: [2.0,  6.0], moon: [4.0,  15.0] },
+  degen:            { pump_dump: [1.4, 3.5], runner: [2.0,  8.0], moon: [5.0,  20.0] },
   moon_bag:         { pump_dump: [1.5, 4.5], runner: [3.0, 12.0], moon: [8.0,  40.0] },
   momentum_rocket:  { pump_dump: [1.4, 4.0], runner: [2.5, 10.0], moon: [6.0,  30.0] },
+};
+
+// Qualifying signals that pass all filters per strategy (per day)
+// Calibrated to post-fix Moon Bag (min_source_count=2) and real Solana market activity
+const DAILY_SIGNAL_RATES = {
+  sniper:           8,   // fee+graduated, decent filter
+  dip_buy:          4,   // ATH dip required — rarer
+  smart_money:      6,   // holders+volume filter
+  degen:            28,  // very loose — catches everything
+  moon_bag:         10,  // fee+(grad or trending) — now practical after fix
+  momentum_rocket:  5,   // hot_level + smart_degen — selective
 };
 
 // ─── Archetype sampler ────────────────────────────────────────────────────────
 
 function sampleArchetype(dist, rand) {
-  const r = rand();
-  let cum = 0;
-  for (const [archetype, prob] of Object.entries(dist)) {
-    cum += prob;
-    if (r < cum) return archetype;
-  }
+  let cum = 0, r = rand();
+  for (const [k, p] of Object.entries(dist)) { cum += p; if (r < cum) return k; }
   return 'flat';
 }
 
-function samplePeakMultiple(archetype, ranges, rand) {
+function samplePeak(archetype, ranges, rand) {
   const r = ranges[archetype];
-  if (!r) return 1.5;
-  return r[0] + rand() * (r[1] - r[0]);
+  return r ? r[0] + rand() * (r[1] - r[0]) : 1.5;
 }
 
-// ─── Monte Carlo runner ───────────────────────────────────────────────────────
+// ─── Per-trade exit logic ─────────────────────────────────────────────────────
+// Runs the full price path through exit logic; returns { pnl%, reason, hwPnl }.
 
-function runSimulation(strategyId, N, rand, randNorm) {
-  const strategy = STRATEGIES[strategyId];
-  const archetypeDist = ARCHETYPE_DISTS[strategyId];
-  const peakRanges    = PEAK_RANGES[strategyId];
+function simulateTrade(strategy, pricePath) {
+  const { tp_percent, sl_percent, trailing_enabled, trailing_from_entry, trailing_percent,
+          tiered_trailing, partial_tp, partial_tp_at_percent, partial_tp_sell_percent,
+          partial_tp_2, partial_tp_2_at_percent, partial_tp_2_sell_percent } = strategy;
 
-  const trades = [];
-  const reasonCounts = { SL: 0, TP: 0, TRAILING_TP: 0, TIME_EXIT: 0 };
+  let hw = 1.0, armed = Boolean(trailing_from_entry);
+  let pt1 = false, pt2 = false, locked = 0, rem = 1.0;
+
+  for (let i = 0; i < pricePath.length; i++) {
+    const px = pricePath[i];
+    const pnl = (px - 1.0) * 100;
+    if (px > hw) hw = px;
+    const hwPnl = (hw - 1.0) * 100;
+
+    if (!armed && trailing_enabled && pnl >= tp_percent) armed = true;
+
+    if (partial_tp && !pt1 && pnl >= partial_tp_at_percent) {
+      pt1 = true;
+      const f = partial_tp_sell_percent / 100;
+      locked += f * pnl; rem -= f;
+    }
+    if (partial_tp_2 && !pt2 && pnl >= partial_tp_2_at_percent) {
+      pt2 = true;
+      const f = (partial_tp_2_sell_percent / 100) * rem;
+      locked += f * pnl; rem -= f;
+    }
+
+    if (pnl <= sl_percent)
+      return { pnl: locked + rem * pnl, reason: 'SL', hwPnl };
+    if (!trailing_enabled && pnl >= tp_percent)
+      return { pnl: locked + rem * pnl, reason: 'TP', hwPnl };
+    if (armed && trailing_enabled) {
+      const trail = tiered_trailing ? getDynamicTrailing(trailing_percent, hwPnl) : Math.abs(trailing_percent);
+      if ((px / hw - 1) * 100 <= -trail)
+        return { pnl: locked + rem * pnl, reason: 'TRAILING_TP', hwPnl };
+    }
+  }
+  const last = pricePath[pricePath.length - 1];
+  const hwPnl = (hw - 1.0) * 100;
+  return { pnl: locked + rem * ((last - 1.0) * 100), reason: 'TIME_EXIT', hwPnl };
+}
+
+// ─── Per-trade Monte Carlo ────────────────────────────────────────────────────
+
+function runTradeMC(strategyId, N, rand, randNorm) {
+  const strat = STRATEGIES[strategyId];
+  const dist  = ARCHETYPE_DISTS[strategyId];
+  const peaks = PEAK_RANGES[strategyId];
+  const pnls  = [];
+  const reasons = {};
 
   for (let i = 0; i < N; i++) {
-    const archetype  = sampleArchetype(archetypeDist, rand);
-    const peakMult   = samplePeakMultiple(archetype, peakRanges, rand);
-    const pricePath  = generatePricePath(archetype, peakMult, rand, randNorm);
-    const trade      = simulateTrade(strategy, pricePath);
-
-    trades.push({ ...trade, archetype });
-    reasonCounts[trade.reason] = (reasonCounts[trade.reason] || 0) + 1;
+    const arch   = sampleArchetype(dist, rand);
+    const peak   = samplePeak(arch, peaks, rand);
+    const path   = generatePricePath(arch, peak, rand, randNorm);
+    const trade  = simulateTrade(strat, path);
+    pnls.push(trade.pnl);
+    reasons[trade.reason] = (reasons[trade.reason] || 0) + 1;
   }
-
-  trades.sort((a, b) => a.pnl - b.pnl);
-
-  const pnls    = trades.map(t => t.pnl);
-  const wins    = trades.filter(t => t.pnl > 0);
-  const losses  = trades.filter(t => t.pnl <= 0);
-  const sum     = pnls.reduce((s, v) => s + v, 0);
-  const grossW  = wins.reduce((s, t) => s + t.pnl, 0);
-  const grossL  = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
-
-  // Percentiles
+  pnls.sort((a, b) => a - b);
+  const sum = pnls.reduce((s, v) => s + v, 0);
+  const wins = pnls.filter(v => v > 0).length;
+  const grossW = pnls.filter(v => v > 0).reduce((s, v) => s + v, 0);
+  const grossL = Math.abs(pnls.filter(v => v <= 0).reduce((s, v) => s + v, 0));
   const p = (q) => pnls[Math.floor(q * N)];
-
-  // Per-trade SOL PnL (position_size_sol * pnl / 100)
-  const solPerTrade = trades.map(t => strategy.position_size_sol * t.pnl / 100);
-  const avgSol = solPerTrade.reduce((s, v) => s + v, 0) / N;
-
-  // Max consecutive losses
-  let maxConsecLoss = 0, curConsec = 0;
-  for (const t of trades) {
-    if (t.pnl <= 0) { curConsec++; maxConsecLoss = Math.max(maxConsecLoss, curConsec); }
-    else curConsec = 0;
-  }
-
-  // Top 5 best and worst
-  const best  = [...trades].sort((a, b) => b.pnl - a.pnl).slice(0, 3);
-  const worst = [...trades].sort((a, b) => a.pnl - b.pnl).slice(0, 3);
-
   return {
-    strategyId,
-    label: strategy.label,
-    N,
-    winRate:    wins.length / N * 100,
-    avgPnl:     sum / N,
-    medianPnl:  p(0.5),
-    p25:        p(0.25),
-    p75:        p(0.75),
-    p10:        p(0.10),
-    p90:        p(0.90),
-    bestPnl:    pnls[N - 1],
-    worstPnl:   pnls[0],
+    strategyId, label: strat.label, N,
+    winRate: wins / N * 100,
+    avgPnl: sum / N,
+    medPnl: p(0.5),
+    p10: p(0.10), p25: p(0.25), p75: p(0.75), p90: p(0.90),
+    bestPnl: pnls[N - 1], worstPnl: pnls[0],
     profitFactor: grossL > 0 ? grossW / grossL : Infinity,
-    avgSolPerTrade: avgSol,
-    reasons: reasonCounts,
-    maxConsecLoss,
-    best,
-    worst,
-    positionSizeSol: strategy.position_size_sol,
+    avgSol: strat.position_size_sol * sum / N / 100,
+    reasons, posSize: strat.position_size_sol,
   };
 }
 
-// ─── Statistics computation ───────────────────────────────────────────────────
+// ─── 7-day portfolio simulator ────────────────────────────────────────────────
+//
+// Event-driven: 5-minute ticks over 7 days.
+// New signals arrive with Poisson probability based on daily signal rate.
+// Each open position tracks its own price path and exit state.
+// Capital is allocated per-trade; partial TPs and trailing stops update in real time.
 
-function bar(value, max, width = 20, fillChar = '█', emptyChar = '░') {
-  const filled = Math.round(clamp(value / max, 0, 1) * width);
-  return fillChar.repeat(filled) + emptyChar.repeat(width - filled);
+const TICK_MINS      = 5;
+const TICKS_PER_DAY  = (24 * 60) / TICK_MINS;   // 288
+const SIM_DAYS       = 7;
+const TOTAL_TICKS    = SIM_DAYS * TICKS_PER_DAY; // 2016
+const START_CAPITAL  = 2.0;
+
+// Advance position by one minute; return final pnl% if exits, else null.
+function tickPosition(pos, price, strat) {
+  if (price > pos.hw) pos.hw = price;
+  const hwPnl = (pos.hw - 1.0) * 100;
+  const pnl   = (price - 1.0) * 100;
+
+  if (!pos.armed && strat.trailing_enabled && pnl >= strat.tp_percent) pos.armed = true;
+
+  if (strat.partial_tp && !pos.pt1 && pnl >= strat.partial_tp_at_percent) {
+    pos.pt1 = true;
+    const f = strat.partial_tp_sell_percent / 100;
+    pos.locked += f * pnl; pos.rem -= f;
+  }
+  if (strat.partial_tp_2 && !pos.pt2 && pnl >= strat.partial_tp_2_at_percent) {
+    pos.pt2 = true;
+    const f = (strat.partial_tp_2_sell_percent / 100) * pos.rem;
+    pos.locked += f * pnl; pos.rem -= f;
+  }
+
+  if (pnl <= strat.sl_percent)          return pos.locked + pos.rem * pnl;
+  if (!strat.trailing_enabled && pnl >= strat.tp_percent) return pos.locked + pos.rem * pnl;
+  if (pos.armed && strat.trailing_enabled) {
+    const trail = strat.tiered_trailing
+      ? getDynamicTrailing(strat.trailing_percent, hwPnl)
+      : Math.abs(strat.trailing_percent);
+    if ((price / pos.hw - 1) * 100 <= -trail) return pos.locked + pos.rem * pnl;
+  }
+  return null;
 }
 
-function printResults(allResults) {
-  const N = allResults[0].N;
+function run7DaySim(strategyId, nRuns, rand, randNorm) {
+  const strat    = STRATEGIES[strategyId];
+  const dist     = ARCHETYPE_DISTS[strategyId];
+  const peaks    = PEAK_RANGES[strategyId];
+  const sigProb  = DAILY_SIGNAL_RATES[strategyId] / TICKS_PER_DAY;
 
-  console.log('\n' + '═'.repeat(100));
-  console.log('  CHARON STRATEGY MONTE CARLO SIMULATION');
-  console.log(`  ${N.toLocaleString()} simulations per strategy · 12-hour max hold · 6 token archetypes`);
-  console.log('═'.repeat(100));
+  const finalCaps     = [];
+  const allDailyCaps  = Array.from({ length: SIM_DAYS + 1 }, () => []);
+  let totalTrades = 0, totalWins = 0;
 
-  // ── Main comparison table ──────────────────────────────────────────────────
-  console.log('\n┌─────────────────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐');
-  console.log('│ Strategy            │ Win Rate │ Avg PnL% │ Med PnL% │  P90 PnL │ PF       │ Avg SOL  │');
-  console.log('├─────────────────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤');
+  for (let run = 0; run < nRuns; run++) {
+    let capital  = START_CAPITAL;
+    const open   = [];   // active positions
+    let maxCap   = capital, minCap = capital, peakCap = capital;
+    let maxDD    = 0;
+    let trades   = 0, wins = 0;
 
-  for (const r of allResults) {
+    allDailyCaps[0].push(capital);
+
+    for (let tick = 0; tick < TOTAL_TICKS; tick++) {
+      // ── Advance all open positions (5 minutes each) ──────────────────────
+      for (let i = open.length - 1; i >= 0; i--) {
+        const pos = open[i];
+        let exited = false;
+        for (let m = 0; m < TICK_MINS; m++) {
+          pos.idx++;
+          const idx = Math.min(pos.idx, pos.path.length - 1);
+          const px  = pos.path[idx];
+          const finalPnl = tickPosition(pos, px, strat);
+
+          if (finalPnl !== null || pos.idx >= pos.path.length) {
+            const pnl  = finalPnl ?? (pos.locked + pos.rem * ((pos.path[pos.path.length - 1] - 1.0) * 100));
+            const gain = strat.position_size_sol * pnl / 100;
+            capital   += strat.position_size_sol + gain;
+            if (pnl > 0) wins++;
+            trades++;
+            open.splice(i, 1);
+            exited = true;
+            break;
+          }
+        }
+      }
+
+      // ── Try to open new position ──────────────────────────────────────────
+      if (rand() < sigProb &&
+          open.length < strat.max_open_positions &&
+          capital >= strat.position_size_sol) {
+        const arch  = sampleArchetype(dist, rand);
+        const peak  = samplePeak(arch, peaks, rand);
+        const path  = generatePricePath(arch, peak, rand, randNorm);
+        capital    -= strat.position_size_sol;
+        open.push({ path, idx: 0, hw: 1.0, armed: Boolean(strat.trailing_from_entry),
+                    pt1: false, pt2: false, locked: 0, rem: 1.0 });
+      }
+
+      // ── Track drawdown & portfolio value ─────────────────────────────────
+      const portVal = capital + open.length * strat.position_size_sol;
+      if (portVal > peakCap) peakCap = portVal;
+      const dd = peakCap > 0 ? (peakCap - portVal) / peakCap * 100 : 0;
+      if (dd > maxDD) maxDD = dd;
+
+      // ── Daily snapshot ────────────────────────────────────────────────────
+      if ((tick + 1) % TICKS_PER_DAY === 0) {
+        const day = Math.floor((tick + 1) / TICKS_PER_DAY);
+        allDailyCaps[day].push(portVal);
+      }
+    }
+
+    // Close all remaining positions at their last price
+    for (const pos of open) {
+      const lastPx  = pos.path[Math.min(pos.idx, pos.path.length - 1)];
+      const lastPnl = pos.locked + pos.rem * ((lastPx - 1.0) * 100);
+      const gain    = strat.position_size_sol * lastPnl / 100;
+      capital      += strat.position_size_sol + gain;
+      if (lastPnl > 0) wins++;
+      trades++;
+    }
+
+    finalCaps.push(capital);
+    totalTrades += trades;
+    totalWins   += wins;
+  }
+
+  // ── Aggregate statistics ──────────────────────────────────────────────────
+  finalCaps.sort((a, b) => a - b);
+  const med  = (arr) => arr.sort((a, b) => a - b)[Math.floor(arr.length / 2)];
+  const pct_ = (arr, q) => {
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(q * s.length)];
+  };
+
+  const mean = finalCaps.reduce((s, v) => s + v, 0) / nRuns;
+  const above = (threshold) => finalCaps.filter(v => v > threshold).length / nRuns * 100;
+
+  // Daily medians
+  const dailyMedians = allDailyCaps.map(arr => arr.length ? med([...arr]) : START_CAPITAL);
+
+  // Max drawdown median
+  return {
+    strategyId, label: strat.label, nRuns,
+    mean, median: finalCaps[Math.floor(nRuns / 2)],
+    p10: pct_(finalCaps, 0.10),
+    p25: pct_(finalCaps, 0.25),
+    p75: pct_(finalCaps, 0.75),
+    p90: pct_(finalCaps, 0.90),
+    best: finalCaps[nRuns - 1],
+    worst: finalCaps[0],
+    returnPct: (mean / START_CAPITAL - 1) * 100,
+    winRate: totalTrades > 0 ? totalWins / totalTrades * 100 : 0,
+    totalTradesPerRun: totalTrades / nRuns,
+    dailyMedians,
+    prob2x:  above(START_CAPITAL * 2),
+    prob3x:  above(START_CAPITAL * 3),
+    prob5x:  above(START_CAPITAL * 5),
+    prob10x: above(START_CAPITAL * 10),
+    probBreakEven: above(START_CAPITAL),
+    probRuin: finalCaps.filter(v => v < START_CAPITAL * 0.25).length / nRuns * 100,
+    posSize: strat.position_size_sol,
+    maxPositions: strat.max_open_positions,
+    dailySignals: DAILY_SIGNAL_RATES[strategyId],
+  };
+}
+
+// ─── Output ───────────────────────────────────────────────────────────────────
+
+function printTradeMC(results) {
+  console.log('\n── Per-trade Monte Carlo (10 000 sims/strategy) ──────────────────────────────────────');
+  console.log('┌─────────────────────┬──────────┬──────────┬──────────┬──────────┬──────────┐');
+  console.log('│ Strategy            │ Win Rate │ Avg PnL% │ Median   │  P90     │    PF    │');
+  console.log('├─────────────────────┼──────────┼──────────┼──────────┼──────────┼──────────┤');
+  for (const r of results) {
     const pf = isFinite(r.profitFactor) ? r.profitFactor.toFixed(2) : '∞';
+    console.log(`│ ${pad(r.label, 19, true)} │ ${pad(r.winRate.toFixed(1)+'%', 8)} │ ${pad(pct(r.avgPnl), 8)} │ ${pad(pct(r.medPnl), 8)} │ ${pad(pct(r.p90), 8)} │ ${pad(pf, 8)} │`);
+  }
+  console.log('└─────────────────────┴──────────┴──────────┴──────────┴──────────┴──────────┘');
+}
+
+function printPortfolioResults(results) {
+  const W = 100;
+  console.log('\n' + '═'.repeat(W));
+  console.log('  7-DAY PORTFOLIO SIMULATION');
+  console.log(`  Starting capital: ${START_CAPITAL} SOL  ·  ${results[0].nRuns} independent runs per strategy`);
+  console.log('═'.repeat(W));
+
+  // ── Main table ────────────────────────────────────────────────────────────
+  console.log(`
+┌──────────────────────┬───────────┬───────────┬───────────┬───────────┬───────────┬───────────┐
+│ Strategy             │ Mean End  │  Median   │   P10     │   P90     │  Best     │ Return%   │
+├──────────────────────┼───────────┼───────────┼───────────┼───────────┼───────────┼───────────┤`);
+  for (const r of results) {
     console.log(
-      `│ ${pad(r.label, 19, true)} │ ${pad(r.winRate.toFixed(1) + '%', 8)} │ ${pad(pct(r.avgPnl), 8)} │ ${pad(pct(r.medianPnl), 8)} │ ${pad(pct(r.p90), 8)} │ ${pad(pf, 8)} │ ${pad(r.avgSolPerTrade.toFixed(4), 8)} │`
+      `│ ${pad(r.label, 20, true)} │ ${pad(sol(r.mean)+' SOL', 9)} │ ${pad(sol(r.median)+' SOL', 9)} │ ${pad(sol(r.p10)+' SOL', 9)} │ ${pad(sol(r.p90)+' SOL', 9)} │ ${pad(sol(r.best)+' SOL', 9)} │ ${pad(pct(r.returnPct, 0), 9)} │`
     );
   }
-  console.log('└─────────────────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘');
-  console.log('  PF = Profit Factor (gross wins / gross losses). Higher is better. >1.5 = good, >2 = great.\n');
+  console.log('└──────────────────────┴───────────┴───────────┴───────────┴───────────┴───────────┴───────────┘');
+  console.log('  P10 = 10th percentile (bad luck run). P90 = 90th percentile (lucky run).\n');
 
-  // ── PnL distribution ──────────────────────────────────────────────────────
-  console.log('── PnL Distribution (P10 / P25 / Median / P75 / P90) ──────────────────────────────────');
-  for (const r of allResults) {
-    const line = [r.p10, r.p25, r.medianPnl, r.p75, r.p90].map(v => pad(pct(v), 8)).join(' │ ');
-    console.log(`  ${pad(r.label, 17, true)}  │ ${line} │`);
+  // ── Median equity curve ───────────────────────────────────────────────────
+  console.log('── Median Equity Curve (SOL) ───────────────────────────────────────────────────────────');
+  const header = ['Strategy             '].concat(
+    ['Start', 'Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Day 7']
+  ).map((h, i) => i === 0 ? pad(h, 21, true) : pad(h, 8)).join(' │ ');
+  console.log('  ' + header);
+  console.log('  ' + '─'.repeat(90));
+  for (const r of results) {
+    const row = [pad(r.label, 21, true)].concat(
+      r.dailyMedians.map(v => pad(sol(v), 8))
+    ).join(' │ ');
+    console.log('  ' + row);
   }
   console.log('');
 
-  // ── Exit reason breakdown ─────────────────────────────────────────────────
-  console.log('── Exit Reason Breakdown (% of trades) ────────────────────────────────────────────────');
-  console.log(`  ${'Strategy'.padEnd(19)}  │  ${'SL'.padStart(5)}  │  ${'TP'.padStart(5)}  │  ${'TRAIL'.padStart(5)}  │  ${'TIMEOUT'.padStart(7)}  │`);
-  console.log('  ' + '─'.repeat(65));
-  for (const r of allResults) {
-    const fmt = (k) => pad(((r.reasons[k] || 0) / N * 100).toFixed(1) + '%', 6);
-    console.log(`  ${pad(r.label, 19, true)}  │  ${fmt('SL')}  │  ${fmt('TP')}  │  ${fmt('TRAILING_TP')}  │  ${pad(((r.reasons.TIME_EXIT||0)/N*100).toFixed(1)+'%', 7)}  │`);
+  // ── Visual equity bars (Day 7 median) ────────────────────────────────────
+  const maxEnd = Math.max(...results.map(r => r.dailyMedians[SIM_DAYS]));
+  console.log('── Day 7 Median Capital ─────────────────────────────────────────────────────────────────');
+  for (const r of results) {
+    const v = r.dailyMedians[SIM_DAYS];
+    const marker = v >= START_CAPITAL ? '▲' : '▼';
+    console.log(`  ${pad(r.label, 20, true)}  ${bar(v, maxEnd * 1.1, 35)} ${sol(v)} SOL ${marker}`);
   }
   console.log('');
 
-  // ── Win rate visual ────────────────────────────────────────────────────────
-  console.log('── Win Rate ────────────────────────────────────────────────────────────────────────────');
-  for (const r of allResults) {
-    console.log(`  ${pad(r.label, 17, true)}  ${bar(r.winRate, 80, 40)} ${r.winRate.toFixed(1)}%`);
+  // ── Probability table ─────────────────────────────────────────────────────
+  console.log('── Outcome Probability Matrix ───────────────────────────────────────────────────────────');
+  console.log(`  ${'Strategy'.padEnd(20)}  │  ${'BE>2'.padStart(6)}  │  ${'2x>4'.padStart(6)}  │  ${'3x>6'.padStart(6)}  │  ${'5x>10'.padStart(6)}  │  ${'10x>20'.padStart(7)}  │  ${'RUIN<0.5'.padStart(8)}  │`);
+  console.log('  ' + '─'.repeat(88));
+  for (const r of results) {
+    const fmt = (v) => pad(v.toFixed(1) + '%', 7);
+    console.log(`  ${pad(r.label, 20, true)}  │  ${fmt(r.probBreakEven)}  │  ${fmt(r.prob2x)}  │  ${fmt(r.prob3x)}  │  ${fmt(r.prob5x)}  │  ${fmt(r.prob10x)}   │  ${fmt(r.probRuin)}   │`);
+  }
+  console.log('  (BE = break-even i.e. > starting 2 SOL. RUIN = final capital < 0.5 SOL)\n');
+
+  // ── Trade statistics ──────────────────────────────────────────────────────
+  console.log('── Trade Throughput & Execution ─────────────────────────────────────────────────────────');
+  console.log(`  ${'Strategy'.padEnd(20)}  │  ${'Sig/day'.padStart(7)}  │  ${'Trades/7d'.padStart(9)}  │  ${'Win%'.padStart(6)}  │  ${'Size'.padStart(6)}  │  ${'MaxPos'.padStart(6)}  │`);
+  console.log('  ' + '─'.repeat(75));
+  for (const r of results) {
+    console.log(`  ${pad(r.label, 20, true)}  │  ${pad(r.dailySignals, 7)}  │  ${pad(r.totalTradesPerRun.toFixed(0), 9)}  │  ${pad(r.winRate.toFixed(1)+'%', 6)}  │  ${pad(r.posSize+' SOL', 6)}  │  ${pad(r.maxPositions, 6)}  │`);
   }
   console.log('');
 
-  // ── Average PnL per trade visual ───────────────────────────────────────────
-  const maxAvgPnl = Math.max(...allResults.map(r => r.avgPnl));
-  console.log('── Average PnL per Trade ────────────────────────────────────────────────────────────────');
-  for (const r of allResults) {
-    const b = r.avgPnl > 0 ? bar(r.avgPnl, maxAvgPnl * 1.1, 40) : '░'.repeat(40);
-    console.log(`  ${pad(r.label, 17, true)}  ${b} ${pct(r.avgPnl)}`);
+  // ── Kelly Criterion ───────────────────────────────────────────────────────
+  console.log('── Kelly Criterion (optimal % of bankroll per trade) ────────────────────────────────────');
+  for (const mc of perTradeResults) {
+    const wins = mc.winRate / 100;
+    const losses = 1 - wins;
+    const avgW = Math.abs(mc.avgPnl > 0 ? mc.avgPnl : 1);
+    const avgL = Math.abs(mc.worstPnl < 0 ? mc.p10 : 25);
+    const kelly = ((wins * avgW - losses * avgL) / avgW) * 100;
+    const halfKelly = kelly / 2;
+    const posSize = STRATEGIES[mc.strategyId].position_size_sol;
+    const kellySol = START_CAPITAL * Math.max(halfKelly, 0) / 100;
+    console.log(`  ${pad(mc.label, 20, true)}  Kelly=${pct(kelly, 1)}  Half-Kelly=${pct(halfKelly, 1)}  → ${sol(kellySol)} SOL/trade  (using ${posSize} SOL)`);
   }
   console.log('');
 
-  // ── Upside capture (best-trade tier) ──────────────────────────────────────
-  console.log('── Best / Worst Trade Outcomes ─────────────────────────────────────────────────────────');
-  for (const r of allResults) {
-    const b = r.best[0];
-    const w = r.worst[0];
-    console.log(`  ${pad(r.label, 17, true)}  Best: ${pct(b.pnl, 0).padStart(8)} (${b.archetype.padEnd(14)}, HW: ${pct(b.hwPnl,0).padStart(7)}, exit: ${b.reason})  │  Worst: ${pct(w.pnl, 0)}`);
-  }
-  console.log('');
+  // ── Ranked summary ────────────────────────────────────────────────────────
+  const ranked = [...results].sort((a, b) => b.mean - a.mean);
+  console.log('── 7-Day Rankings (by mean final capital) ───────────────────────────────────────────────');
+  ranked.forEach((r, i) => {
+    const medal = ['🥇', '🥈', '🥉', '4️⃣ ', '5️⃣ ', '6️⃣ '][i] || `${i + 1}.`;
+    const gain  = r.mean - START_CAPITAL;
+    const sign  = gain >= 0 ? '+' : '';
+    console.log(`  ${medal}  ${pad(r.label, 20, true)}  ${sol(r.mean)} SOL median (${sign}${sol(gain)} SOL)  ·  ${r.prob3x.toFixed(1)}% chance 3x  ·  ${r.probRuin.toFixed(1)}% ruin`);
+  });
 
-  // ── Expected value per 1 SOL risked ───────────────────────────────────────
-  console.log('── Expected Value per 1 SOL Position ──────────────────────────────────────────────────');
-  for (const r of allResults) {
-    const ev  = r.avgPnl / 100; // SOL gain per 1 SOL in (relative)
-    const evSol = r.avgSolPerTrade;
-    const sign = evSol >= 0 ? '+' : '';
-    console.log(`  ${pad(r.label, 17, true)}  EV = ${sign}${evSol.toFixed(5)} SOL per ${r.positionSizeSol} SOL trade  (${sign}${(ev * 100).toFixed(2)}% return)`);
-  }
-  console.log('');
-
-  // ── Trailing stop analysis ─────────────────────────────────────────────────
-  console.log('── Trailing Stop Deep Dive ─────────────────────────────────────────────────────────────');
-  console.log('  Strategies with trailing_from_entry capture more of each pump by staying in until');
-  console.log('  the trailing stop fires, rather than exiting at a fixed TP ceiling.');
-  console.log('');
-  const trailingStrategies = allResults.filter(r => STRATEGIES[r.strategyId].trailing_from_entry);
-  const nonTrailing = allResults.filter(r => !STRATEGIES[r.strategyId].trailing_from_entry && STRATEGIES[r.strategyId].trailing_enabled);
-  const fixedTp = allResults.filter(r => !STRATEGIES[r.strategyId].trailing_enabled);
-
-  if (trailingStrategies.length) {
-    console.log('  Trailing-from-entry (unlimited upside):');
-    for (const r of trailingStrategies) {
-      const trailPct = ((r.reasons.TRAILING_TP || 0) / N * 100).toFixed(1);
-      const sl = ((r.reasons.SL || 0) / N * 100).toFixed(1);
-      console.log(`    ${pad(r.label, 17, true)}  ${trailPct}% exited via trailing  │  ${sl}% stopped out  │  p90=${pct(r.p90)}`);
-    }
-    console.log('');
-  }
-  if (nonTrailing.length) {
-    console.log('  Arms-after-TP (standard trailing):');
-    for (const r of nonTrailing) {
-      const trailPct = ((r.reasons.TRAILING_TP || 0) / N * 100).toFixed(1);
-      const tpPct = ((r.reasons.TP || 0) / N * 100).toFixed(1);
-      console.log(`    ${pad(r.label, 17, true)}  ${trailPct}% trailing + ${tpPct}% fixed TP  │  p90=${pct(r.p90)}`);
-    }
-    console.log('');
-  }
-  if (fixedTp.length) {
-    console.log('  Fixed TP (no trailing):');
-    for (const r of fixedTp) {
-      const tpPct = ((r.reasons.TP || 0) / N * 100).toFixed(1);
-      console.log(`    ${pad(r.label, 17, true)}  ${tpPct}% fixed TP  │  p90=${pct(r.p90)}`);
-    }
-    console.log('');
-  }
-
-  // ── Key takeaways ──────────────────────────────────────────────────────────
-  const ranked = [...allResults].sort((a, b) => b.avgSolPerTrade - a.avgSolPerTrade);
-  const best1 = ranked[0];
-  const best2 = ranked[1];
-  console.log('── Summary & Recommendations ───────────────────────────────────────────────────────────');
-  console.log(`  #1 Expected Value: ${best1.label} (${best1.avgSolPerTrade > 0 ? '+' : ''}${best1.avgSolPerTrade.toFixed(5)} SOL/trade, ${best1.winRate.toFixed(1)}% win rate)`);
-  console.log(`  #2 Expected Value: ${best2.label} (${best2.avgSolPerTrade > 0 ? '+' : ''}${best2.avgSolPerTrade.toFixed(5)} SOL/trade, ${best2.winRate.toFixed(1)}% win rate)`);
-  console.log('');
-
-  const moonResult = allResults.find(r => r.strategyId === 'moon_bag');
-  const sniperResult = allResults.find(r => r.strategyId === 'sniper');
-  if (moonResult && sniperResult) {
-    const diff = moonResult.avgSolPerTrade - sniperResult.avgSolPerTrade;
-    const diffPct = (diff / Math.abs(sniperResult.avgSolPerTrade)) * 100;
-    const sign = diff >= 0 ? '+' : '';
-    console.log(`  Moon Bag vs Sniper EV delta: ${sign}${diff.toFixed(5)} SOL (${sign}${diffPct.toFixed(1)}%)`);
-    console.log(`  Trailing-from-entry p90: Moon Bag ${pct(moonResult.p90)} vs Sniper ${pct(sniperResult.p90)}`);
-  }
   console.log('');
   console.log('  Notes:');
-  console.log('  · Token outcome distributions are calibrated to observed Solana meme-coin behaviour.');
-  console.log('  · Tiered trailing tightens as profits grow → locks in more gain on big runners.');
-  console.log('  · Partial TPs reduce per-trade variance by banking profit at intermediate levels.');
-  console.log('  · Moon Bag and Momentum Rocket use trailing_from_entry so there is NO TP ceiling.');
-  console.log('  · Slippage, gas costs, and failed transactions are not modelled.');
-  console.log('═'.repeat(100) + '\n');
-}
-
-// ─── Archetype breakdown table ────────────────────────────────────────────────
-
-function printArchetypeBreakdown() {
-  console.log('── Simulated Token Archetype Distributions (entry quality per strategy) ──────────────');
-  console.log('  Strategy             │ Imm.Rug │ SlwBleed │ PmpDump │  Runner │    Moon │    Flat │');
-  console.log('  ' + '─'.repeat(80));
-  for (const [id, dist] of Object.entries(ARCHETYPE_DISTS)) {
-    const s = STRATEGIES[id];
-    const fmt = (k) => pad((dist[k] * 100).toFixed(0) + '%', 7);
-    console.log(`  ${pad(s.label, 19, true)}  │ ${fmt('immediate_rug')} │ ${fmt('slow_bleed')}  │ ${fmt('pump_dump')} │ ${fmt('runner')} │ ${fmt('moon')}  │ ${fmt('flat')}  │`);
-  }
-  console.log('  (Better filters → lower Imm.Rug %, higher Runner/Moon %)');
-  console.log('');
+  console.log('  · Signal rates calibrated to post-fix Moon Bag (min_source_count=2) and Solana activity.');
+  console.log('  · Price paths limited to 12 h max per position — very long moon runs slightly undervalued.');
+  console.log('  · Slippage, gas, LLM latency, and failed transactions are not modelled.');
+  console.log('  · Re-run simulate.js to see variance; outcomes differ across seeds.');
+  console.log('═'.repeat(W) + '\n');
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-const N_SIMS = 10_000;
-const SEED   = 0xdeadbeef;
+const N_TRADE_SIMS   = 10_000;
+const N_PORTFOLIO    = 500;
+const SEED           = 0xdeadbeef;
 
 const rand     = makePrng(SEED);
 const randNorm = makeRandNorm(rand);
 
-console.log('\nRunning Monte Carlo simulation...');
-const t0 = Date.now();
+console.log('\nCharon Strategy Simulation');
+console.log('──────────────────────────');
 
-const allResults = Object.keys(STRATEGIES).map(id => {
+// Part 1 — per-trade Monte Carlo
+console.log('\nPart 1: Per-trade Monte Carlo (10 000 trades each)...');
+const perTradeResults = Object.keys(STRATEGIES).map(id => {
   process.stdout.write(`  ${STRATEGIES[id].label.padEnd(20)} `);
-  const r = runSimulation(id, N_SIMS, rand, randNorm);
-  console.log(`done (win ${r.winRate.toFixed(1)}%, avg ${pct(r.avgPnl)})`);
+  const r = runTradeMC(id, N_TRADE_SIMS, rand, randNorm);
+  console.log(`done  win=${r.winRate.toFixed(1)}%  avg=${pct(r.avgPnl)}`);
   return r;
 });
+printTradeMC(perTradeResults);
 
-console.log(`\nCompleted in ${Date.now() - t0}ms`);
-
-printArchetypeBreakdown();
-printResults(allResults);
+// Part 2 — 7-day portfolio
+console.log(`\nPart 2: 7-day portfolio simulation (${N_PORTFOLIO} runs, ${START_CAPITAL} SOL start)...`);
+const t0 = Date.now();
+const portfolioResults = Object.keys(STRATEGIES).map(id => {
+  process.stdout.write(`  ${STRATEGIES[id].label.padEnd(20)} `);
+  const r = run7DaySim(id, N_PORTFOLIO, rand, randNorm);
+  console.log(`done  mean=${sol(r.mean)} SOL  p90=${sol(r.p90)} SOL`);
+  return r;
+});
+console.log(`\nTotal simulation time: ${Date.now() - t0}ms`);
+printPortfolioResults(portfolioResults);
