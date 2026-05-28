@@ -2,6 +2,48 @@ import { db } from './connection.js';
 import { now, json } from '../utils.js';
 import { numSetting, boolSetting, setting, activeStrategy } from './settings.js';
 
+export function getRecapStats() {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const cutoff24h = Date.now() - DAY_MS;
+
+  function statsFor(rows) {
+    const closed = rows.filter(r => r.status === 'closed');
+    const wins   = closed.filter(r => Number(r.pnl_percent || 0) > 0);
+    const losses = closed.filter(r => Number(r.pnl_percent || 0) <= 0);
+    const totalPnlPct = closed.reduce((s, r) => s + Number(r.pnl_percent || 0), 0);
+    const totalPnlSol = closed.reduce((s, r) => s + Number(r.pnl_sol || 0), 0);
+    const byReason = {};
+    for (const r of closed) {
+      const k = r.exit_reason || 'UNKNOWN';
+      byReason[k] = (byReason[k] || 0) + 1;
+    }
+    const best = [...closed].sort((a, b) => Number(b.pnl_percent || 0) - Number(a.pnl_percent || 0)).slice(0, 3);
+    return {
+      total: rows.length,
+      closed: closed.length,
+      open: rows.length - closed.length,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: closed.length ? wins.length / closed.length * 100 : null,
+      avgPnlPct: closed.length ? totalPnlPct / closed.length : null,
+      totalPnlPct,
+      totalPnlSol,
+      byReason,
+      best,
+    };
+  }
+
+  const allRows  = db.prepare('SELECT * FROM dry_run_positions ORDER BY opened_at_ms DESC').all();
+  const rows24h  = allRows.filter(r => Number(r.opened_at_ms || 0) >= cutoff24h);
+  const openRows = allRows.filter(r => r.status === 'open');
+
+  return {
+    allTime: statsFor(allRows),
+    last24h: statsFor(rows24h),
+    openPositions: openRows,
+  };
+}
+
 export function openPositions() {
   return db.prepare('SELECT * FROM dry_run_positions WHERE status = ? ORDER BY opened_at_ms DESC').all('open');
 }

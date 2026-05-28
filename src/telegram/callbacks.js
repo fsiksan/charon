@@ -16,6 +16,8 @@ import {
   sendTpSlDefaults,
   strategyMenuText,
   strategyKeyboard,
+  recapText,
+  recapKeyboard,
 } from './menus.js';
 import { sendTelegram, sendBatch, sendPositionOpen, sendTradeIntent } from './send.js';
 import { candidateSummary } from './format.js';
@@ -56,6 +58,9 @@ export async function handleCallback(query) {
   if (data === 'menu:pnl') {
     const { sendPnl } = await import('./send.js');
     return sendPnl(chatId, query);
+  }
+  if (data === 'menu:recap') {
+    return editMenuMessage(query, recapText(), recapKeyboard());
   }
   if (data === 'menu:settings') return editMenuMessage(query, `${agentText()}\n\n${filtersText()}`, navKeyboard([
     [

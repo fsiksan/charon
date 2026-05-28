@@ -212,6 +212,7 @@ export function initDb() {
   // partial_tp_2_done: second partial take-profit level (deeper profit tier)
   ensureColumn('dry_run_positions', 'partial_tp_2_done', 'INTEGER DEFAULT 0');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
+  migrateStrategyConfigs();
 
   const defaults = {
     agent_enabled: 'true',
@@ -388,48 +389,45 @@ export function initDb() {
     llm_min_confidence: 0,
   }), ts);
 
-  // Moon Bag — triple-confirmed signals, rides winners to maximum with tiered profit lock.
-  // trailing_from_entry removes the TP ceiling so positions can 10x+ without auto-exit.
+  // Moon Bag — dual-confirmed signals (fee+graduated OR fee+trending), rides winners
+  // to maximum with tiered profit lock. trailing_from_entry removes the TP ceiling.
   // Two partial TPs secure capital; the remaining bag trails with a tightening stop.
   stratInsert.run('moon_bag', 'Moon Bag', 0, JSON.stringify({
     entry_mode: 'immediate',
-    min_source_count: 3,          // fee + graduated + trending all required
+    min_source_count: 2,          // fee+graduated OR fee+trending (was 3 — too restrictive)
     require_fee_claim: true,
-    token_age_max_ms: 3600000,    // fresh launches only
+    token_age_max_ms: 7200000,    // 2h window for fresh launches
     min_mcap_usd: 8000,
-    max_mcap_usd: 150000,         // early enough to catch the big move
-    min_fee_claim_sol: 2.0,       // strong fee signal
-    min_gmgn_total_fee_sol: 15,
-    min_holders: 50,
-    max_top20_holder_percent: 65, // some concentration OK for early movers
+    max_mcap_usd: 150000,
+    min_fee_claim_sol: 0.5,       // lowered from 2.0 — catches more quality signals
+    min_gmgn_total_fee_sol: 5,    // lowered from 15
+    min_holders: 30,
+    max_top20_holder_percent: 70,
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: 0,
     min_graduated_volume_usd: 0,
-    trending_min_volume_usd: 2000,
-    trending_min_swaps: 50,
-    trending_max_rug_ratio: 0.25,
-    trending_max_bundler_rate: 0.4,
-    min_liquidity_usd: 5000,      // must be liquid enough to exit
+    trending_min_volume_usd: 1000,
+    trending_min_swaps: 30,
+    trending_max_rug_ratio: 0.30,
+    trending_max_bundler_rate: 0.45,
+    min_liquidity_usd: 2000,
     min_hot_level: 0,
     min_smart_degen_count: 0,
     position_size_sol: 0.1,
     max_open_positions: 3,
-    // tp_percent is the MINIMUM profit before trailing arms (no hard exit)
     tp_percent: 50,
     sl_percent: -22,
     trailing_enabled: true,
-    trailing_from_entry: true,    // arm trailing immediately — unlimited upside
-    trailing_percent: 22,         // base trail; tightens automatically above 40% PnL
+    trailing_from_entry: true,
+    trailing_percent: 22,
     tiered_trailing: true,
-    // Sell 25% at +100% — recover ~half the position cost, ride the rest
     partial_tp: true,
     partial_tp_at_percent: 100,
     partial_tp_sell_percent: 25,
-    // Sell another 25% of original at +300% — deep profit tier secured
     partial_tp_2: true,
     partial_tp_2_at_percent: 300,
     partial_tp_2_sell_percent: 25,
-    max_hold_ms: 0,               // no time cap — let winners run
+    max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 70,
   }), ts);
@@ -478,6 +476,33 @@ export function initDb() {
     use_llm: true,
     llm_min_confidence: 65,
   }), ts);
+}
+
+// Patch existing strategy configs in the DB if they still carry old restrictive values.
+// Runs on every startup but is idempotent (only writes when migration is needed).
+function migrateStrategyConfigs() {
+  const moonRow = db.prepare("SELECT config_json FROM strategies WHERE id = 'moon_bag'").get();
+  if (moonRow) {
+    const cfg = JSON.parse(moonRow.config_json);
+    // Detect old config by its overly-strict triple-source requirement or high fee thresholds
+    if (Number(cfg.min_source_count) >= 3 || Number(cfg.min_fee_claim_sol) >= 1.5) {
+      Object.assign(cfg, {
+        min_source_count: 2,
+        min_fee_claim_sol: 0.5,
+        min_gmgn_total_fee_sol: 5,
+        min_holders: 30,
+        max_top20_holder_percent: 70,
+        token_age_max_ms: 7200000,
+        trending_min_volume_usd: 1000,
+        trending_min_swaps: 30,
+        trending_max_rug_ratio: 0.30,
+        trending_max_bundler_rate: 0.45,
+        min_liquidity_usd: 2000,
+      });
+      db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'moon_bag'").run(JSON.stringify(cfg));
+      console.log('[db] moon_bag migrated: min_source_count 3→2, fee thresholds lowered');
+    }
+  }
 }
 
 export function ensureColumn(table, column, ddl) {
