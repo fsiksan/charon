@@ -283,6 +283,8 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 50,
+    buy_slippage_bps: 300,
+    sell_slippage_bps: 800,
   }), ts);
 
   stratInsert.run('dip_buy', 'Dip Buy', 0, JSON.stringify({
@@ -315,6 +317,8 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 60,
+    buy_slippage_bps: 300,
+    sell_slippage_bps: 500,
   }), ts);
 
   stratInsert.run('smart_money', 'Smart Money', 0, JSON.stringify({
@@ -347,6 +351,8 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 70,
+    buy_slippage_bps: 200,
+    sell_slippage_bps: 500,
   }), ts);
 
   stratInsert.run('degen', 'Degen', 0, JSON.stringify({
@@ -387,6 +393,8 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: false,
     llm_min_confidence: 0,
+    buy_slippage_bps: 500,
+    sell_slippage_bps: 1500,
   }), ts);
 
   // Moon Bag — dual-confirmed signals (fee+graduated OR fee+trending), rides winners
@@ -430,6 +438,8 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 70,
+    buy_slippage_bps: 300,
+    sell_slippage_bps: 1000,
   }), ts);
 
   // Momentum Rocket — catches hot trending tokens with smart-money accumulation.
@@ -475,8 +485,19 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 65,
+    buy_slippage_bps: 500,
+    sell_slippage_bps: 1000,
   }), ts);
 }
+
+const SLIPPAGE_DEFAULTS = {
+  sniper:           { buy_slippage_bps: 300,  sell_slippage_bps: 800  },
+  dip_buy:          { buy_slippage_bps: 300,  sell_slippage_bps: 500  },
+  smart_money:      { buy_slippage_bps: 200,  sell_slippage_bps: 500  },
+  degen:            { buy_slippage_bps: 500,  sell_slippage_bps: 1500 },
+  moon_bag:         { buy_slippage_bps: 300,  sell_slippage_bps: 1000 },
+  momentum_rocket:  { buy_slippage_bps: 500,  sell_slippage_bps: 1000 },
+};
 
 // Patch existing strategy configs in the DB if they still carry old restrictive values.
 // Runs on every startup but is idempotent (only writes when migration is needed).
@@ -501,6 +522,19 @@ function migrateStrategyConfigs() {
       });
       db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'moon_bag'").run(JSON.stringify(cfg));
       console.log('[db] moon_bag migrated: min_source_count 3→2, fee thresholds lowered');
+    }
+  }
+
+  // Patch missing slippage fields on all existing strategies
+  const allStrats = db.prepare('SELECT id, config_json FROM strategies').all();
+  for (const row of allStrats) {
+    const cfg = JSON.parse(row.config_json);
+    const defaults = SLIPPAGE_DEFAULTS[row.id] || { buy_slippage_bps: 300, sell_slippage_bps: 1000 };
+    if (cfg.buy_slippage_bps == null || cfg.sell_slippage_bps == null) {
+      if (cfg.buy_slippage_bps == null) cfg.buy_slippage_bps = defaults.buy_slippage_bps;
+      if (cfg.sell_slippage_bps == null) cfg.sell_slippage_bps = defaults.sell_slippage_bps;
+      db.prepare('UPDATE strategies SET config_json = ? WHERE id = ?').run(JSON.stringify(cfg), row.id);
+      console.log(`[db] ${row.id} migrated: added buy/sell slippage (${cfg.buy_slippage_bps}/${cfg.sell_slippage_bps} bps)`);
     }
   }
 }
