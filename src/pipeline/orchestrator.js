@@ -85,9 +85,17 @@ export async function processCandidateFromSignals(signals) {
     batchDecision.id = currentDecisionId;
   }
 
-  if (batchId) await sendBatchReveal(batchId, rows, batchDecision, candidateId);
+  // Use per-strategy confidence threshold (falls back to global setting if not set)
+  const minConfidence = strat.llm_min_confidence ?? numSetting('llm_min_confidence', 75);
+  const willAutoBuy = selectedRow && boolSetting('agent_enabled', true) &&
+    batchDecision.verdict === 'BUY' && batchDecision.confidence >= minConfidence;
 
-  if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= numSetting('llm_min_confidence', 75)) {
+  // Skip batch reveal in dry_run when auto-buying — sendPositionOpen is the relevant notification
+  if (batchId && !(tradingMode() === 'dry_run' && willAutoBuy)) {
+    await sendBatchReveal(batchId, rows, batchDecision, candidateId);
+  }
+
+  if (willAutoBuy) {
     if (!canOpenMorePositions()) {
       const max = numSetting('max_open_positions', 3);
       console.log(`[agent] max open positions reached (${openPositionCount()}/${max}), skipping buy ${selectedRow.candidate.token.mint}`);
@@ -113,7 +121,7 @@ export async function processCandidateFromSignals(signals) {
       action: selectedRow ? 'entry_not_approved' : 'no_candidate_selected',
       guardrails: {
         agentEnabled: boolSetting('agent_enabled', true),
-        confidenceThreshold: numSetting('llm_min_confidence', 75),
+        confidenceThreshold: minConfidence,
         openPositions: openPositionCount(),
         maxOpenPositions: numSetting('max_open_positions', 3),
       },
