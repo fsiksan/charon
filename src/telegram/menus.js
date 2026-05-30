@@ -389,15 +389,11 @@ export function candidateButtons(candidateId, decision = null) {
     return {
       reply_markup: {
         inline_keyboard: [
-          [{ text: 'LLM BUY selected', callback_data: 'noop' }],
           [
-            { text: 'View Candidate', callback_data: `cand:${candidateId}` },
             { text: 'Positions', callback_data: 'menu:positions' },
+            { text: 'Dry Buy', callback_data: `buy:${candidateId}` },
           ],
-          [
-            { text: 'Set TP/SL', callback_data: `tpsl:c:${candidateId}` },
-            { text: 'Ignore', callback_data: `ign:${candidateId}` },
-          ],
+          [{ text: 'Ignore', callback_data: `ign:${candidateId}` }],
         ],
       },
     };
