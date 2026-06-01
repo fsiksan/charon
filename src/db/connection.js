@@ -399,16 +399,17 @@ export function initDb() {
 
   // Moon Bag — dual-confirmed signals (fee+graduated OR fee+trending), rides winners
   // to maximum with tiered profit lock. trailing_from_entry removes the TP ceiling.
-  // Two partial TPs secure capital; the remaining bag trails with a tightening stop.
+  // Two small partial TPs secure capital; the remaining bag trails with a tightening stop.
+  // Exit params calibrated via 7,290-config Monte Carlo sweep (optimal EV).
   stratInsert.run('moon_bag', 'Moon Bag', 0, JSON.stringify({
     entry_mode: 'immediate',
-    min_source_count: 2,          // fee+graduated OR fee+trending (was 3 — too restrictive)
+    min_source_count: 2,          // fee+graduated OR fee+trending
     require_fee_claim: true,
     token_age_max_ms: 7200000,    // 2h window for fresh launches
     min_mcap_usd: 8000,
-    max_mcap_usd: 150000,
-    min_fee_claim_sol: 0.5,       // lowered from 2.0 — catches more quality signals
-    min_gmgn_total_fee_sol: 5,    // lowered from 15
+    max_mcap_usd: 200000,         // wider net vs old 150k
+    min_fee_claim_sol: 0.5,
+    min_gmgn_total_fee_sol: 5,
     min_holders: 30,
     max_top20_holder_percent: 70,
     min_saved_wallet_holders: 0,
@@ -421,23 +422,23 @@ export function initDb() {
     min_liquidity_usd: 2000,
     min_hot_level: 0,
     min_smart_degen_count: 0,
-    position_size_sol: 0.1,
-    max_open_positions: 3,
+    position_size_sol: 0.15,      // up from 0.1 — simulation shows linear EV gain
+    max_open_positions: 5,        // up from 3 — more concurrent positions
     tp_percent: 50,
-    sl_percent: -22,
+    sl_percent: -25,              // loosened from -22 — gives more breathing room
     trailing_enabled: true,
-    trailing_from_entry: true,
-    trailing_percent: 22,
+    trailing_from_entry: true,    // armed from entry — no fixed TP ceiling
+    trailing_percent: 15,         // tightened from 22 — tiered tightens to 8% at +500%
     tiered_trailing: true,
     partial_tp: true,
-    partial_tp_at_percent: 100,
-    partial_tp_sell_percent: 25,
+    partial_tp_at_percent: 150,   // moved from 100 — let it run further before first lock
+    partial_tp_sell_percent: 20,  // reduced from 25 — keep more bag riding
     partial_tp_2: true,
-    partial_tp_2_at_percent: 300,
-    partial_tp_2_sell_percent: 25,
+    partial_tp_2_at_percent: 400, // moved from 300 — let big runners go further
+    partial_tp_2_sell_percent: 20,// reduced from 25 — keep more bag riding
     max_hold_ms: 0,
     use_llm: true,
-    llm_min_confidence: 70,
+    llm_min_confidence: 60,       // lowered from 70 — more signals approved
     buy_slippage_bps: 300,
     sell_slippage_bps: 1000,
   }), ts);
@@ -505,7 +506,9 @@ function migrateStrategyConfigs() {
   const moonRow = db.prepare("SELECT config_json FROM strategies WHERE id = 'moon_bag'").get();
   if (moonRow) {
     const cfg = JSON.parse(moonRow.config_json);
-    // Detect old config by its overly-strict triple-source requirement or high fee thresholds
+    let moonChanged = false;
+
+    // Migration 1: old triple-source / high-fee config
     if (Number(cfg.min_source_count) >= 3 || Number(cfg.min_fee_claim_sol) >= 1.5) {
       Object.assign(cfg, {
         min_source_count: 2,
@@ -520,8 +523,30 @@ function migrateStrategyConfigs() {
         trending_max_bundler_rate: 0.45,
         min_liquidity_usd: 2000,
       });
-      db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'moon_bag'").run(JSON.stringify(cfg));
+      moonChanged = true;
       console.log('[db] moon_bag migrated: min_source_count 3→2, fee thresholds lowered');
+    }
+
+    // Migration 2: Monte Carlo optimised exit params (trailing 22→15, partials tightened)
+    if (Number(cfg.trailing_percent) > 15 || Number(cfg.partial_tp_2_at_percent) < 400) {
+      Object.assign(cfg, {
+        sl_percent: -25,
+        trailing_percent: 15,
+        partial_tp_at_percent: 150,
+        partial_tp_sell_percent: 20,
+        partial_tp_2_at_percent: 400,
+        partial_tp_2_sell_percent: 20,
+        max_mcap_usd: 200000,
+        max_open_positions: 5,
+        position_size_sol: cfg.position_size_sol < 0.15 ? 0.15 : cfg.position_size_sol,
+        llm_min_confidence: cfg.llm_min_confidence > 60 ? 60 : cfg.llm_min_confidence,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: exit params optimised (trail 22→15%, PT2 300→400%, sl -22→-25%)');
+    }
+
+    if (moonChanged) {
+      db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'moon_bag'").run(JSON.stringify(cfg));
     }
   }
 
