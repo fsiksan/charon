@@ -64,13 +64,49 @@ export function tradingMode() {
   return ['dry_run', 'confirm', 'live'].includes(mode) ? mode : 'dry_run';
 }
 
+// Conviction-weighted position sizing. When a strategy enables conviction_sizing, the
+// buy size scales linearly with the LLM confidence between position_size_min_sol and
+// position_size_max_sol — more capital on stronger signals, less on borderline ones.
+// Deterministic given (strat, decision.confidence) so every call site resolves the same size.
+export function resolvePositionSizeSol(strat, decision) {
+  const base = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);
+  if (!strat.conviction_sizing) return base;
+  const min = strat.position_size_min_sol ?? base;
+  const max = strat.position_size_max_sol ?? base;
+  if (max <= min) return base;
+  const conf = Number(decision?.confidence);
+  if (!Number.isFinite(conf)) return base;
+  const floor = strat.llm_min_confidence ?? 0;
+  const span = Math.max(1, 100 - floor);
+  const t = Math.max(0, Math.min(1, (conf - floor) / span));
+  return Math.round((min + (max - min) * t) * 1000) / 1000;
+}
+
+// Daily realized PnL (SOL) since UTC midnight — basis for the circuit breaker.
+export function dailyRealizedPnlSol() {
+  const startOfDayMs = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z').getTime();
+  const row = db.prepare(
+    "SELECT COALESCE(SUM(pnl_sol), 0) AS pnl FROM dry_run_positions WHERE status = 'closed' AND closed_at_ms >= ?"
+  ).get(startOfDayMs);
+  return Number(row.pnl || 0);
+}
+
+// Circuit breaker: pause new automated entries once today's realized losses exceed the
+// configured limit. Protects against a bad cluster of rugs draining the day's capital.
+export function circuitBreakerTripped() {
+  if (!boolSetting('circuit_breaker_enabled', true)) return false;
+  const limit = numSetting('daily_loss_limit_sol', 0.35);
+  if (limit <= 0) return false;
+  return dailyRealizedPnlSol() <= -limit;
+}
+
 export function allPositions(limit = 10) {
   return db.prepare('SELECT * FROM dry_run_positions ORDER BY id DESC LIMIT ?').all(limit);
 }
 
 export function createDryRunPosition(candidateId, candidate, decision, reason = 'llm_buy') {
   const strat = activeStrategy();
-  const sizeSol = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);
+  const sizeSol = resolvePositionSizeSol(strat, decision);
   const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
   const entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
   const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));
@@ -127,7 +163,7 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
 
 export function createLivePosition(candidateId, candidate, decision, swap, reason = 'live_buy') {
   const strat = activeStrategy();
-  const sizeSol = strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1);
+  const sizeSol = resolvePositionSizeSol(strat, decision);
   const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
   const entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
   const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));

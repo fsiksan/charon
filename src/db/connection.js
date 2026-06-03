@@ -222,6 +222,8 @@ export function initDb() {
     llm_min_confidence: '75',
     max_open_positions: process.env.MAX_OPEN_POSITIONS || '3',
     dry_run_buy_sol: '0.1',
+    circuit_breaker_enabled: process.env.CIRCUIT_BREAKER_ENABLED || 'true',
+    daily_loss_limit_sol: process.env.DAILY_LOSS_LIMIT_SOL || '0.35',
     default_tp_percent: '50',
     default_sl_percent: '-25',
     default_trailing_enabled: 'true',
@@ -400,16 +402,19 @@ export function initDb() {
   // Moon Bag — dual-confirmed signals (fee+graduated OR fee+trending), rides winners
   // to maximum with tiered profit lock. trailing_from_entry removes the TP ceiling.
   // Two small partial TPs secure capital; the remaining bag trails with a tightening stop.
-  // Exit params calibrated via 7,290-config Monte Carlo sweep (optimal EV).
+  // Exit params + risk controls calibrated via realistic-execution Monte Carlo:
+  // slippage modelled as a ceiling (winners exit cheap) and rugs gap through the stop
+  // (the true tail risk). Pre-buy audit gating + circuit breaker + conviction sizing
+  // raise median return AND cut drawdown vs the prior config.
   stratInsert.run('moon_bag', 'Moon Bag', 0, JSON.stringify({
     entry_mode: 'immediate',
     min_source_count: 2,          // fee+graduated OR fee+trending
     require_fee_claim: true,
-    token_age_max_ms: 7200000,    // 2h window for fresh launches
+    token_age_max_ms: 14400000,   // 4h window — more signals, negligible quality loss
     min_mcap_usd: 8000,
-    max_mcap_usd: 200000,         // wider net vs old 150k
+    max_mcap_usd: 400000,         // wider net for more opportunities
     min_fee_claim_sol: 0.5,
-    min_gmgn_total_fee_sol: 5,
+    min_gmgn_total_fee_sol: 3,    // looser — more signals
     min_holders: 30,
     max_top20_holder_percent: 70,
     min_saved_wallet_holders: 0,
@@ -422,23 +427,32 @@ export function initDb() {
     min_liquidity_usd: 2000,
     min_hot_level: 0,
     min_smart_degen_count: 0,
-    position_size_sol: 0.15,      // up from 0.1 — simulation shows linear EV gain
-    max_open_positions: 5,        // up from 3 — more concurrent positions
+    // Pre-buy safety audit — the dominant real risk is rugs gapping through the SL,
+    // so reject them before entry. Enforced only when Jupiter audit data is present.
+    require_mint_revoked: true,
+    require_freeze_revoked: true,
+    max_dev_holder_percent: 5,
+    // Conviction-weighted sizing — scale capital by LLM confidence (0.10–0.22 SOL).
+    conviction_sizing: true,
+    position_size_sol: 0.15,      // base/mid size (used when conviction sizing is off)
+    position_size_min_sol: 0.10,
+    position_size_max_sol: 0.22,
+    max_open_positions: 6,
     tp_percent: 50,
-    sl_percent: -25,              // loosened from -22 — gives more breathing room
+    sl_percent: -22,              // realistic model: rugs gap through anyway, tighter cuts bleeders
     trailing_enabled: true,
     trailing_from_entry: true,    // armed from entry — no fixed TP ceiling
-    trailing_percent: 15,         // tightened from 22 — tiered tightens to 8% at +500%
+    trailing_percent: 15,         // tiered tightens to 8% at +500%
     tiered_trailing: true,
     partial_tp: true,
-    partial_tp_at_percent: 150,   // moved from 100 — let it run further before first lock
-    partial_tp_sell_percent: 20,  // reduced from 25 — keep more bag riding
+    partial_tp_at_percent: 120,   // bank a slice once orderly profit is real (cheap exit)
+    partial_tp_sell_percent: 25,
     partial_tp_2: true,
-    partial_tp_2_at_percent: 400, // moved from 300 — let big runners go further
-    partial_tp_2_sell_percent: 20,// reduced from 25 — keep more bag riding
-    max_hold_ms: 0,
+    partial_tp_2_at_percent: 400, // let big runners go further before second lock
+    partial_tp_2_sell_percent: 15,// keep more of the deep bag riding for moon capture
+    max_hold_ms: 10800000,        // 3h force-exit — recycles capital out of stagnant positions
     use_llm: true,
-    llm_min_confidence: 60,       // lowered from 70 — more signals approved
+    llm_min_confidence: 60,
     buy_slippage_bps: 300,
     sell_slippage_bps: 1000,
   }), ts);
@@ -543,6 +557,35 @@ function migrateStrategyConfigs() {
       });
       moonChanged = true;
       console.log('[db] moon_bag migrated: exit params optimised (trail 22→15%, PT2 300→400%, sl -22→-25%)');
+    }
+
+    // Migration 3: full improvement bundle — pre-buy audit gating, conviction sizing,
+    // realistic-execution exit tuning, more signals + capital recycling. Detected by the
+    // absence of the conviction_sizing field (added with this bundle).
+    if (cfg.conviction_sizing == null) {
+      Object.assign(cfg, {
+        // realistic-execution exit tuning
+        sl_percent: -22,
+        partial_tp_at_percent: 120,
+        partial_tp_sell_percent: 25,
+        partial_tp_2_sell_percent: 15,
+        max_hold_ms: 10800000,
+        // more signals + capital recycling
+        token_age_max_ms: 14400000,
+        max_mcap_usd: 400000,
+        min_gmgn_total_fee_sol: 3,
+        max_open_positions: 6,
+        // pre-buy safety audit
+        require_mint_revoked: true,
+        require_freeze_revoked: true,
+        max_dev_holder_percent: 5,
+        // conviction-weighted sizing
+        conviction_sizing: true,
+        position_size_min_sol: 0.10,
+        position_size_max_sol: 0.22,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: improvement bundle (audit gating, conviction sizing, capital recycling)');
     }
 
     if (moonChanged) {

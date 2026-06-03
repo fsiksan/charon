@@ -88,6 +88,20 @@ export function filterCandidate(candidate) {
     failures.push(`max top holder: ${maxHolder}% > ${strat.max_top20_holder_percent}%`);
   }
 
+  // Pre-buy safety audit (Jupiter audit data) — the dominant real risk is rugs that gap
+  // through the stop-loss, so reject obvious rug setups BEFORE buying. Each check is only
+  // enforced when the underlying audit field is actually present (defensive against missing data).
+  const audit = candidate.audit || {};
+  if (strat.require_mint_revoked && audit.mintAuthorityDisabled === false) {
+    failures.push('audit: mint authority not revoked');
+  }
+  if (strat.require_freeze_revoked && audit.freezeAuthorityDisabled === false) {
+    failures.push('audit: freeze authority not revoked');
+  }
+  if (strat.max_dev_holder_percent > 0 && Number.isFinite(audit.devBalancePercent) && audit.devBalancePercent > strat.max_dev_holder_percent) {
+    failures.push(`audit: dev holds ${audit.devBalancePercent.toFixed(1)}% > max ${strat.max_dev_holder_percent}%`);
+  }
+
   // Saved wallet holders
   if (strat.min_saved_wallet_holders > 0 && savedCount < strat.min_saved_wallet_holders) {
     failures.push(`saved wallet holders: ${savedCount} < ${strat.min_saved_wallet_holders}`);
@@ -194,6 +208,15 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     graduation: graduatedCoin,
     trending: trendingToken,
     feeClaim: fee ? buildFeeSnapshot(fee, signature) : null,
+    // Safety audit fields surfaced from Jupiter asset data for pre-buy rug gating.
+    // null = unknown (not enforced); false/number = known value the filter can act on.
+    audit: {
+      mintAuthorityDisabled: jupiterAsset?.audit?.mintAuthorityDisabled ?? null,
+      freezeAuthorityDisabled: jupiterAsset?.audit?.freezeAuthorityDisabled ?? null,
+      topHoldersPercent: Number.isFinite(Number(jupiterAsset?.audit?.topHoldersPercentage)) ? Number(jupiterAsset.audit.topHoldersPercentage) : null,
+      devBalancePercent: Number.isFinite(Number(jupiterAsset?.audit?.devBalancePercentage)) ? Number(jupiterAsset.audit.devBalancePercentage) : null,
+      lpBurnedPercent: Number.isFinite(Number(jupiterAsset?.audit?.lpBurnedPercentage)) ? Number(jupiterAsset.audit.lpBurnedPercentage) : null,
+    },
     gmgn,
     jupiterAsset,
     holders,

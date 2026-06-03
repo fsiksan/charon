@@ -200,6 +200,7 @@ export function agentText() {
     `Size: ${fmtSol(strat.position_size_sol)} SOL`,
     `TP/SL: ${fmtPct(strat.tp_percent)} / ${fmtPct(strat.sl_percent)}`,
     `Trailing: ${strat.trailing_enabled ? fmtPct(strat.trailing_percent) : 'off'}`,
+    `Circuit breaker: <b>${boolSetting('circuit_breaker_enabled', true) ? 'on' : 'off'}</b> (daily loss limit ${fmtSol(numSetting('daily_loss_limit_sol', 0.35))} SOL)`,
   ].join('\n');
 }
 
@@ -226,6 +227,13 @@ export function agentKeyboard() {
           { text: 'Fresh 5m', callback_data: 'set:llm_candidate_max_age_ms:300000' },
           { text: 'Fresh 10m', callback_data: 'set:llm_candidate_max_age_ms:600000' },
           { text: 'Fresh 20m', callback_data: 'set:llm_candidate_max_age_ms:1200000' },
+        ],
+        [{ text: `Circuit Breaker ${boolSetting('circuit_breaker_enabled', true) ? 'on' : 'off'}`, callback_data: 'toggle:circuit_breaker_enabled' }],
+        [
+          { text: 'Loss Limit 0.2', callback_data: 'set:daily_loss_limit_sol:0.2' },
+          { text: '0.35', callback_data: 'set:daily_loss_limit_sol:0.35' },
+          { text: '0.5', callback_data: 'set:daily_loss_limit_sol:0.5' },
+          { text: '1.0', callback_data: 'set:daily_loss_limit_sol:1' },
         ],
         [{ text: 'Back', callback_data: 'menu:main' }],
       ],
@@ -283,6 +291,10 @@ export function strategyMenuText() {
     strat.max_hold_ms > 0 ? `Max hold: ${Math.round(strat.max_hold_ms / 60000)}m` : null,
     strat.use_llm ? `LLM: yes (min ${strat.llm_min_confidence}%)` : 'LLM: no (rule-based)',
     `Slippage — buy: ${strat.buy_slippage_bps ?? 300} bps (${((strat.buy_slippage_bps ?? 300) / 100).toFixed(1)}%) · sell: ${strat.sell_slippage_bps ?? 1000} bps (${((strat.sell_slippage_bps ?? 1000) / 100).toFixed(1)}%)`,
+    strat.conviction_sizing ? `Conviction sizing: ${fmtSol(strat.position_size_min_sol)}–${fmtSol(strat.position_size_max_sol)} SOL by confidence` : null,
+    (strat.require_mint_revoked || strat.require_freeze_revoked || strat.max_dev_holder_percent > 0)
+      ? `Audit gate: ${[strat.require_mint_revoked ? 'mint-revoked' : null, strat.require_freeze_revoked ? 'freeze-revoked' : null, strat.max_dev_holder_percent > 0 ? `dev ≤${strat.max_dev_holder_percent}%` : null].filter(Boolean).join(', ')}`
+      : null,
     '',
     ...all.map(s => `${s.enabled ? '▶' : '○'} ${s.name}`),
   ].filter(Boolean).join('\n');
@@ -354,6 +366,18 @@ export function strategyKeyboard() {
     [
       { text: `Buy Slip ${strat.buy_slippage_bps ?? 300}bps`, callback_data: 'stratcfg:buy_slippage_bps' },
       { text: `Sell Slip ${strat.sell_slippage_bps ?? 1000}bps`, callback_data: 'stratcfg:sell_slippage_bps' },
+    ],
+    [
+      { text: `Conviction ${strat.conviction_sizing ? 'on' : 'off'}`, callback_data: 'stratcfg:conviction_sizing' },
+      { text: `Dev Max ${strat.max_dev_holder_percent > 0 ? strat.max_dev_holder_percent + '%' : 'off'}`, callback_data: 'stratcfg:max_dev_holder_percent' },
+    ],
+    [
+      { text: `Size Min ${fmtSol(strat.position_size_min_sol ?? strat.position_size_sol)}`, callback_data: 'stratcfg:position_size_min_sol' },
+      { text: `Size Max ${fmtSol(strat.position_size_max_sol ?? strat.position_size_sol)}`, callback_data: 'stratcfg:position_size_max_sol' },
+    ],
+    [
+      { text: `Mint Rev ${strat.require_mint_revoked ? 'on' : 'off'}`, callback_data: 'stratcfg:require_mint_revoked' },
+      { text: `Freeze Rev ${strat.require_freeze_revoked ? 'on' : 'off'}`, callback_data: 'stratcfg:require_freeze_revoked' },
     ],
   ];
   return {
