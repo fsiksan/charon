@@ -22,6 +22,7 @@ export function menuKeyboard() {
         ],
         [
           { text: '📊 Recap', callback_data: 'menu:recap' },
+          { text: '🩺 Health', callback_data: 'menu:health' },
         ],
       ],
     },

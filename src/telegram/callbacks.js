@@ -63,6 +63,10 @@ export async function handleCallback(query) {
     const { sendPnl } = await import('./send.js');
     return sendPnl(chatId, query);
   }
+  if (data === 'menu:health') {
+    const { sendHealth } = await import('./commands.js');
+    return sendHealth(chatId);
+  }
   if (data === 'menu:recap') {
     return editMenuMessage(query, recapText(), recapKeyboard());
   }
