@@ -400,31 +400,36 @@ export function initDb() {
   }), ts);
 
   // Moon Bag — dual-confirmed signals (fee+graduated OR fee+trending), rides winners
-  // to maximum with tiered profit lock. trailing_from_entry removes the TP ceiling.
-  // Two small partial TPs secure capital; the remaining bag trails with a tightening stop.
-  // Exit params + risk controls calibrated via realistic-execution Monte Carlo:
-  // slippage modelled as a ceiling (winners exit cheap) and rugs gap through the stop
-  // (the true tail risk). Pre-buy audit gating + circuit breaker + conviction sizing
-  // raise median return AND cut drawdown vs the prior config.
+  // to maximum with tiered profit lock.
+  // Exit engine recalibrated against 76 real dry-run trades (23.7% win, −2.1%/trade):
+  // trailing armed from entry was converting every +3–16% blip into a trailing exit at
+  // −4..−13% — 76% of all "TRAILING_TP" exits were losses. Trailing now arms only after
+  // +25% (tp_percent), noise tokens exit via the flat −18% SL, and runners survive their
+  // first normal dip. Partials lowered to levels pumps actually reach (80%/250%).
+  // Pre-buy audit gating + circuit breaker + conviction sizing unchanged.
   stratInsert.run('moon_bag', 'Moon Bag', 0, JSON.stringify({
     entry_mode: 'immediate',
     min_source_count: 2,          // fee+graduated OR fee+trending
     require_fee_claim: true,
-    token_age_max_ms: 14400000,   // 4h window — more signals, negligible quality loss
+    // Entry filters tightened from real dry-run evidence: 65% of entries were
+    // rug/bleed/noise tokens no exit engine can save. Real SOL in trading fees
+    // is the strongest traction signal; fresh tokens (<1.5h) with real liquidity
+    // and volume are the ones that still have a move ahead of them.
+    token_age_max_ms: 5400000,    // 1.5h — older graduates are usually already fading
     min_mcap_usd: 8000,
-    max_mcap_usd: 400000,         // wider net for more opportunities
+    max_mcap_usd: 150000,         // room to actually 2–5x
     min_fee_claim_sol: 0.5,
-    min_gmgn_total_fee_sol: 3,    // looser — more signals
-    min_holders: 30,
-    max_top20_holder_percent: 70,
+    min_gmgn_total_fee_sol: 8,    // real traction filter — cuts most noise/bleed intake
+    min_holders: 75,
+    max_top20_holder_percent: 50, // lower concentration = lower rug risk
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: 0,
     min_graduated_volume_usd: 0,
-    trending_min_volume_usd: 1000,
-    trending_min_swaps: 30,
-    trending_max_rug_ratio: 0.30,
+    trending_min_volume_usd: 5000,
+    trending_min_swaps: 80,
+    trending_max_rug_ratio: 0.20,
     trending_max_bundler_rate: 0.45,
-    min_liquidity_usd: 2000,
+    min_liquidity_usd: 8000,      // exits must be viable at sell time
     min_hot_level: 0,
     min_smart_degen_count: 0,
     // Pre-buy safety audit — the dominant real risk is rugs gapping through the SL,
@@ -438,21 +443,21 @@ export function initDb() {
     position_size_min_sol: 0.10,
     position_size_max_sol: 0.22,
     max_open_positions: 6,
-    tp_percent: 50,
-    sl_percent: -22,              // realistic model: rugs gap through anyway, tighter cuts bleeders
+    tp_percent: 25,               // trail ARM threshold — trailing activates once up +25%
+    sl_percent: -18,              // hard floor while trail is unarmed; rugs gap through anyway
     trailing_enabled: true,
-    trailing_from_entry: true,    // armed from entry — no fixed TP ceiling
+    trailing_from_entry: false,   // arm only after +25% — see header comment
     trailing_percent: 15,         // tiered tightens to 8% at +500%
     tiered_trailing: true,
     partial_tp: true,
-    partial_tp_at_percent: 120,   // bank a slice once orderly profit is real (cheap exit)
-    partial_tp_sell_percent: 25,
+    partial_tp_at_percent: 80,    // bank the first slice sooner — most pumps stall before +120%
+    partial_tp_sell_percent: 30,
     partial_tp_2: true,
-    partial_tp_2_at_percent: 400, // let big runners go further before second lock
-    partial_tp_2_sell_percent: 15,// keep more of the deep bag riding for moon capture
+    partial_tp_2_at_percent: 250, // second lock at a level runners actually reach
+    partial_tp_2_sell_percent: 20,
     max_hold_ms: 10800000,        // 3h force-exit — recycles capital out of stagnant positions
     use_llm: true,
-    llm_min_confidence: 60,
+    llm_min_confidence: 72,       // selective — fewer, better entries (pairs with tight filters)
     buy_slippage_bps: 300,
     sell_slippage_bps: 1000,
   }), ts);
@@ -541,8 +546,10 @@ function migrateStrategyConfigs() {
       console.log('[db] moon_bag migrated: min_source_count 3→2, fee thresholds lowered');
     }
 
-    // Migration 2: Monte Carlo optimised exit params (trailing 22→15, partials tightened)
-    if (Number(cfg.trailing_percent) > 15 || Number(cfg.partial_tp_2_at_percent) < 400) {
+    // Migration 2: Monte Carlo optimised exit params (trailing 22→15, partials tightened).
+    // Only for pre-bundle configs (conviction_sizing missing) — migration 4 moves
+    // partial_tp_2_at_percent below 400 on purpose and must not be reverted here.
+    if (cfg.conviction_sizing == null && (Number(cfg.trailing_percent) > 15 || Number(cfg.partial_tp_2_at_percent) < 400)) {
       Object.assign(cfg, {
         sl_percent: -25,
         trailing_percent: 15,
@@ -586,6 +593,54 @@ function migrateStrategyConfigs() {
       });
       moonChanged = true;
       console.log('[db] moon_bag migrated: improvement bundle (audit gating, conviction sizing, capital recycling)');
+    }
+
+    // Migration 4: exit-engine recalibration from real dry-run results (76 trades,
+    // 23.7% win rate). trailing_from_entry was shaking every position out on its first
+    // 15% retrace — trail now arms at +25% with a flat −18% SL below it, and partial
+    // TPs moved down to levels pumps actually reach. Detected by trailing_from_entry
+    // still being true (set by migration 3 / old seed).
+    if (cfg.trailing_from_entry === true) {
+      Object.assign(cfg, {
+        trailing_from_entry: false,
+        tp_percent: 25,
+        sl_percent: -18,
+        partial_tp_at_percent: 80,
+        partial_tp_sell_percent: 30,
+        partial_tp_2_at_percent: 250,
+        partial_tp_2_sell_percent: 20,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: trail arms at +25% (was from entry), sl -18, partials 80/250');
+    }
+
+    // Repair: a zero trail width silently widens to 20% at runtime (|| 20 fallback)
+    // while the UI shows 0.0% — restore the intended 15%.
+    if (!(Number(cfg.trailing_percent) > 0)) {
+      cfg.trailing_percent = 15;
+      moonChanged = true;
+      console.log('[db] moon_bag repaired: trailing_percent 0 → 15');
+    }
+
+    // Migration 5: tighten entry filters. Real dry-run showed 65% of entries were
+    // rug/bleed/noise tokens that no exit engine can save — quality over quantity.
+    // Detected by the exact loose values migration 3 wrote, so a config the user has
+    // since customized by hand is left alone.
+    if (Number(cfg.max_mcap_usd) === 400000 && Number(cfg.min_gmgn_total_fee_sol) === 3) {
+      Object.assign(cfg, {
+        min_gmgn_total_fee_sol: 8,
+        token_age_max_ms: 5400000,
+        max_mcap_usd: 150000,
+        min_liquidity_usd: 8000,
+        trending_min_volume_usd: 5000,
+        trending_min_swaps: 80,
+        trending_max_rug_ratio: 0.20,
+        min_holders: 75,
+        max_top20_holder_percent: 50,
+        llm_min_confidence: 72,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: entry filters tightened (fee 8, age 1.5h, mcap 150k, liq 8k, conf 72)');
     }
 
     if (moonChanged) {
