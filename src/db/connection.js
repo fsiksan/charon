@@ -411,21 +411,25 @@ export function initDb() {
     entry_mode: 'immediate',
     min_source_count: 2,          // fee+graduated OR fee+trending
     require_fee_claim: true,
-    token_age_max_ms: 14400000,   // 4h window — more signals, negligible quality loss
+    // Entry filters tightened from real dry-run evidence: 65% of entries were
+    // rug/bleed/noise tokens no exit engine can save. Real SOL in trading fees
+    // is the strongest traction signal; fresh tokens (<1.5h) with real liquidity
+    // and volume are the ones that still have a move ahead of them.
+    token_age_max_ms: 5400000,    // 1.5h — older graduates are usually already fading
     min_mcap_usd: 8000,
-    max_mcap_usd: 400000,         // wider net for more opportunities
+    max_mcap_usd: 150000,         // room to actually 2–5x
     min_fee_claim_sol: 0.5,
-    min_gmgn_total_fee_sol: 3,    // looser — more signals
-    min_holders: 30,
-    max_top20_holder_percent: 70,
+    min_gmgn_total_fee_sol: 8,    // real traction filter — cuts most noise/bleed intake
+    min_holders: 75,
+    max_top20_holder_percent: 50, // lower concentration = lower rug risk
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: 0,
     min_graduated_volume_usd: 0,
-    trending_min_volume_usd: 1000,
-    trending_min_swaps: 30,
-    trending_max_rug_ratio: 0.30,
+    trending_min_volume_usd: 5000,
+    trending_min_swaps: 80,
+    trending_max_rug_ratio: 0.20,
     trending_max_bundler_rate: 0.45,
-    min_liquidity_usd: 2000,
+    min_liquidity_usd: 8000,      // exits must be viable at sell time
     min_hot_level: 0,
     min_smart_degen_count: 0,
     // Pre-buy safety audit — the dominant real risk is rugs gapping through the SL,
@@ -453,7 +457,7 @@ export function initDb() {
     partial_tp_2_sell_percent: 20,
     max_hold_ms: 10800000,        // 3h force-exit — recycles capital out of stagnant positions
     use_llm: true,
-    llm_min_confidence: 60,
+    llm_min_confidence: 72,       // selective — fewer, better entries (pairs with tight filters)
     buy_slippage_bps: 300,
     sell_slippage_bps: 1000,
   }), ts);
@@ -616,6 +620,27 @@ function migrateStrategyConfigs() {
       cfg.trailing_percent = 15;
       moonChanged = true;
       console.log('[db] moon_bag repaired: trailing_percent 0 → 15');
+    }
+
+    // Migration 5: tighten entry filters. Real dry-run showed 65% of entries were
+    // rug/bleed/noise tokens that no exit engine can save — quality over quantity.
+    // Detected by the exact loose values migration 3 wrote, so a config the user has
+    // since customized by hand is left alone.
+    if (Number(cfg.max_mcap_usd) === 400000 && Number(cfg.min_gmgn_total_fee_sol) === 3) {
+      Object.assign(cfg, {
+        min_gmgn_total_fee_sol: 8,
+        token_age_max_ms: 5400000,
+        max_mcap_usd: 150000,
+        min_liquidity_usd: 8000,
+        trending_min_volume_usd: 5000,
+        trending_min_swaps: 80,
+        trending_max_rug_ratio: 0.20,
+        min_holders: 75,
+        max_top20_holder_percent: 50,
+        llm_min_confidence: 72,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: entry filters tightened (fee 8, age 1.5h, mcap 150k, liq 8k, conf 72)');
     }
 
     if (moonChanged) {
