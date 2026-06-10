@@ -109,10 +109,15 @@ export function createDryRunPosition(candidateId, candidate, decision, reason = 
   const sizeSol = resolvePositionSizeSol(strat, decision);
   const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
   const entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
-  const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));
-  const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
+  // Strategy exit params take precedence — they are tuned per-strategy. The LLM's
+  // generic suggestion is only a fallback when the strategy doesn't define a value.
+  const tp = Number(strat.tp_percent ?? decision.suggested_tp_percent ?? numSetting('default_tp_percent', 50));
+  const sl = Number(strat.sl_percent ?? decision.suggested_sl_percent ?? numSetting('default_sl_percent', -25));
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
-  const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
+  // Guard against a zero/invalid trail width: 0 silently becomes 20% downstream
+  // (getDynamicTrailingPercent's || 20 fallback) while the UI shows 0.0% — confusing and wider than intended.
+  const stratTrail = Number(strat.trailing_percent);
+  const trailingPercent = stratTrail > 0 ? stratTrail : numSetting('default_trailing_percent', 20);
   const trailingFromEntry = strat.trailing_from_entry ? 1 : 0;
 
   return db.transaction(() => {
@@ -166,10 +171,11 @@ export function createLivePosition(candidateId, candidate, decision, swap, reaso
   const sizeSol = resolvePositionSizeSol(strat, decision);
   const entryPrice = Number(candidate.metrics.priceUsd || 0) || null;
   const entryMcap = Number(candidate.metrics.marketCapUsd || candidate.metrics.graduatedMarketCapUsd || 0) || null;
-  const tp = Number(decision.suggested_tp_percent || strat.tp_percent || numSetting('default_tp_percent', 50));
-  const sl = Number(decision.suggested_sl_percent || strat.sl_percent || numSetting('default_sl_percent', -25));
+  const tp = Number(strat.tp_percent ?? decision.suggested_tp_percent ?? numSetting('default_tp_percent', 50));
+  const sl = Number(strat.sl_percent ?? decision.suggested_sl_percent ?? numSetting('default_sl_percent', -25));
   const trailingEnabled = (strat.trailing_enabled ?? boolSetting('default_trailing_enabled', true)) ? 1 : 0;
-  const trailingPercent = strat.trailing_percent ?? numSetting('default_trailing_percent', 20);
+  const stratTrail = Number(strat.trailing_percent);
+  const trailingPercent = stratTrail > 0 ? stratTrail : numSetting('default_trailing_percent', 20);
   const trailingFromEntry = strat.trailing_from_entry ? 1 : 0;
 
   return db.transaction(() => {
