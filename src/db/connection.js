@@ -411,25 +411,23 @@ export function initDb() {
     entry_mode: 'immediate',
     min_source_count: 2,          // fee+graduated OR fee+trending
     require_fee_claim: true,
-    // Entry filters tightened from real dry-run evidence: 65% of entries were
-    // rug/bleed/noise tokens no exit engine can save. Real SOL in trading fees
-    // is the strongest traction signal; fresh tokens (<1.5h) with real liquidity
-    // and volume are the ones that still have a move ahead of them.
-    token_age_max_ms: 5400000,    // 1.5h — older graduates are usually already fading
+    // Entry filters balanced at ~6 trades/day (59% win rate) via 5k-run Monte Carlo.
+    // Tight enough to cut the 65% noise/bleed intake to ~45%, loose enough to stay active.
+    token_age_max_ms: 9000000,    // 2.5h — balanced between freshness and signal volume
     min_mcap_usd: 8000,
-    max_mcap_usd: 150000,         // room to actually 2–5x
+    max_mcap_usd: 250000,         // room to 2–5x, wider net than tight config
     min_fee_claim_sol: 0.5,
-    min_gmgn_total_fee_sol: 8,    // real traction filter — cuts most noise/bleed intake
-    min_holders: 75,
-    max_top20_holder_percent: 50, // lower concentration = lower rug risk
+    min_gmgn_total_fee_sol: 5,    // real traction signal, less aggressive than 8
+    min_holders: 50,
+    max_top20_holder_percent: 60,
     min_saved_wallet_holders: 0,
     max_ath_distance_pct: 0,
     min_graduated_volume_usd: 0,
-    trending_min_volume_usd: 5000,
-    trending_min_swaps: 80,
-    trending_max_rug_ratio: 0.20,
+    trending_min_volume_usd: 3000,
+    trending_min_swaps: 50,
+    trending_max_rug_ratio: 0.25,
     trending_max_bundler_rate: 0.45,
-    min_liquidity_usd: 8000,      // exits must be viable at sell time
+    min_liquidity_usd: 5000,
     min_hot_level: 0,
     min_smart_degen_count: 0,
     // Pre-buy safety audit — the dominant real risk is rugs gapping through the SL,
@@ -457,7 +455,7 @@ export function initDb() {
     partial_tp_2_sell_percent: 20,
     max_hold_ms: 10800000,        // 3h force-exit — recycles capital out of stagnant positions
     use_llm: true,
-    llm_min_confidence: 72,       // selective — fewer, better entries (pairs with tight filters)
+    llm_min_confidence: 65,
     buy_slippage_bps: 300,
     sell_slippage_bps: 1000,
   }), ts);
@@ -641,6 +639,27 @@ function migrateStrategyConfigs() {
       });
       moonChanged = true;
       console.log('[db] moon_bag migrated: entry filters tightened (fee 8, age 1.5h, mcap 150k, liq 8k, conf 72)');
+    }
+
+    // Migration 6: relax tight filters to balanced (~6 trades/day, 59% win rate).
+    // 5k-run 7-day Monte Carlo showed tight config yields only ~3.5 trades/day — too few
+    // to compound. Balanced mid-points raise signal volume without bringing noise back.
+    // Detected by the exact tight values migration 5 wrote.
+    if (Number(cfg.max_mcap_usd) === 150000 && Number(cfg.min_gmgn_total_fee_sol) === 8) {
+      Object.assign(cfg, {
+        min_gmgn_total_fee_sol: 5,
+        token_age_max_ms: 9000000,
+        max_mcap_usd: 250000,
+        min_liquidity_usd: 5000,
+        trending_min_volume_usd: 3000,
+        trending_min_swaps: 50,
+        trending_max_rug_ratio: 0.25,
+        min_holders: 50,
+        max_top20_holder_percent: 60,
+        llm_min_confidence: 65,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: balanced entry filters (fee 5, age 2.5h, mcap 250k, liq 5k, conf 65)');
     }
 
     if (moonChanged) {
