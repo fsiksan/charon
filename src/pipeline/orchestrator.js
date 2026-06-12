@@ -132,6 +132,16 @@ export async function processCandidateFromSignals(signals) {
       return;
     }
     await handleApprovedBuy(selectedRow, batchDecision, batchId, rows, candidateId);
+
+    // Secondary pick — if LLM found a second exceptional candidate, try to enter it too
+    const secondaryRow = batchDecision.secondary_row;
+    const secondaryConf = batchDecision.secondary_confidence || 0;
+    if (secondaryRow && secondaryConf >= minConfidence && canOpenMorePositions()) {
+      const secondaryDecision = { ...batchDecision, selected_row: secondaryRow, confidence: secondaryConf,
+        selected_candidate_id: secondaryRow.id, selected_mint: secondaryRow.candidate.token.mint };
+      console.log(`[agent] secondary pick: ${secondaryRow.candidate.token.mint.slice(0, 8)} conf=${secondaryConf}`);
+      await handleApprovedBuy(secondaryRow, secondaryDecision, batchId, rows, candidateId);
+    }
   } else {
     logDecisionEvent({
       batchId,
