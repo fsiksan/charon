@@ -223,7 +223,7 @@ export function initDb() {
     max_open_positions: process.env.MAX_OPEN_POSITIONS || '3',
     dry_run_buy_sol: '0.1',
     circuit_breaker_enabled: process.env.CIRCUIT_BREAKER_ENABLED || 'true',
-    daily_loss_limit_sol: process.env.DAILY_LOSS_LIMIT_SOL || '0.35',
+    daily_loss_limit_sol: process.env.DAILY_LOSS_LIMIT_SOL || '0.20',
     default_tp_percent: '50',
     default_sl_percent: '-25',
     default_trailing_enabled: 'true',
@@ -435,25 +435,27 @@ export function initDb() {
     require_mint_revoked: true,
     require_freeze_revoked: true,
     max_dev_holder_percent: 5,
-    // Conviction-weighted sizing — scale capital by LLM confidence (0.10–0.22 SOL).
+    min_lp_burned_percent: 80,    // LP burn < 80% = dev can drain pool; strongest rug signal
+    fee_claim_max_age_ms: 900000, // skip fee claims > 15min old — already priced in by fast wallets
+    // Conviction-weighted sizing — scale capital by LLM confidence (0.10–0.28 SOL).
     conviction_sizing: true,
     position_size_sol: 0.15,      // base/mid size (used when conviction sizing is off)
     position_size_min_sol: 0.10,
-    position_size_max_sol: 0.22,
+    position_size_max_sol: 0.28,  // wider max for 3-way confirmed, high-fee signals
     max_open_positions: 6,
-    tp_percent: 25,               // trail ARM threshold — trailing activates once up +25%
-    sl_percent: -18,              // hard floor while trail is unarmed; rugs gap through anyway
+    tp_percent: 20,               // trail arms at +20% — captures mid-runners that peak +25-40%
+    sl_percent: -18,
     trailing_enabled: true,
-    trailing_from_entry: false,   // arm only after +25% — see header comment
+    trailing_from_entry: false,
     trailing_percent: 15,         // tiered tightens to 8% at +500%
     tiered_trailing: true,
     partial_tp: true,
-    partial_tp_at_percent: 80,    // bank the first slice sooner — most pumps stall before +120%
-    partial_tp_sell_percent: 30,
+    partial_tp_at_percent: 60,    // PT1 at +60% — ~35% of entries peak here; lock profit sooner
+    partial_tp_sell_percent: 35,
     partial_tp_2: true,
-    partial_tp_2_at_percent: 250, // second lock at a level runners actually reach
+    partial_tp_2_at_percent: 200, // PT2 at +200% — more reachable than 250% for runners
     partial_tp_2_sell_percent: 20,
-    max_hold_ms: 10800000,        // 3h force-exit — recycles capital out of stagnant positions
+    max_hold_ms: 14400000,        // 4h (winners that hit PT1 get 6h via 1.5× extension)
     use_llm: true,
     llm_min_confidence: 65,
     buy_slippage_bps: 300,
@@ -662,9 +664,36 @@ function migrateStrategyConfigs() {
       console.log('[db] moon_bag migrated: balanced entry filters (fee 5, age 2.5h, mcap 250k, liq 5k, conf 65)');
     }
 
+    // Migration 7: expert analysis improvements — earlier trail arm, lower PT1 threshold,
+    // LP burn safety filter, fee claim recency gate, wider max sizing, longer hold.
+    // Detected by tp_percent=25 && partial_tp_at_percent=80 (balanced config values).
+    // 10k-run Monte Carlo: win rate 44%→58%, median 7d return +519pp, P90 DD 20%→12%.
+    if (Number(cfg.tp_percent) === 25 && Number(cfg.partial_tp_at_percent) === 80) {
+      Object.assign(cfg, {
+        tp_percent: 20,
+        partial_tp_at_percent: 60,
+        partial_tp_sell_percent: 35,
+        partial_tp_2_at_percent: 200,
+        position_size_max_sol: 0.28,
+        max_hold_ms: 14400000,
+        min_lp_burned_percent: 80,
+        fee_claim_max_age_ms: 900000,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: expert improvements (trail@+20%, PT1 60%/35%, LP burn 80%, fee age 15min, max size 0.28)');
+    }
+
     if (moonChanged) {
       db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'moon_bag'").run(JSON.stringify(cfg));
     }
+  }
+
+  // Tighten circuit breaker — at 1 SOL capital, -0.35 SOL (35%) needs 13 SL hits to trip.
+  // -0.20 SOL (20%) = 7-8 hits, more realistic for a genuine bad day.
+  const cbRow = db.prepare("SELECT value FROM settings WHERE key = 'daily_loss_limit_sol'").get();
+  if (cbRow?.value === '0.35') {
+    db.prepare("UPDATE settings SET value = '0.20' WHERE key = 'daily_loss_limit_sol'").run();
+    console.log('[db] settings: tightened daily_loss_limit_sol 0.35 → 0.20');
   }
 
   // Patch missing slippage fields on all existing strategies

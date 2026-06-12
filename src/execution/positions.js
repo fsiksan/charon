@@ -176,8 +176,12 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   let exitReason = null;
   let closed = false;
 
-  // Max hold time check
-  if (strat?.max_hold_ms > 0 && (now() - position.opened_at_ms) >= strat.max_hold_ms) {
+  // Max hold time check. Proven winners (PT1 fired = hit +60%+) earn 50% extra hold time
+  // since the remaining bag is playing with recovered capital and narrative runners run longer.
+  const effectiveMaxHoldMs = (strat?.max_hold_ms > 0 && position.partial_tp_done)
+    ? strat.max_hold_ms * 1.5
+    : strat?.max_hold_ms;
+  if (effectiveMaxHoldMs > 0 && (now() - position.opened_at_ms) >= effectiveMaxHoldMs) {
     exitReason = 'MAX_HOLD';
   }
 
