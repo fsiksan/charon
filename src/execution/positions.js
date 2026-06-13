@@ -107,15 +107,17 @@ export async function refreshCandidateForExecution(row) {
 
 const sellInProgress = new Set();
 
-// Returns a tighter trailing % as profits grow — locks in more gain without capping upside.
-// At entry the full trail is used; above 50% it progressively tightens.
+// Returns a tighter trailing % as profits grow. In the current no-runner market, tokens
+// spike +25-35% then fade — so the trail clamps tight (~9%) the moment a position is up
+// even modestly (+12%), locking the spike instead of giving it all back. Big runners
+// (rare now) still get an 8% trail at the top tiers, which preserves most of the move.
 function getDynamicTrailingPercent(basePercent, highWaterPnl) {
   const base = Math.abs(Number(basePercent) || 20);
   if (highWaterPnl >= 500) return Math.max(base * 0.45, 8);
-  if (highWaterPnl >= 300) return Math.max(base * 0.55, 9);
-  if (highWaterPnl >= 150) return Math.max(base * 0.65, 10);
-  if (highWaterPnl >= 75)  return Math.max(base * 0.75, 11);
-  if (highWaterPnl >= 40)  return Math.max(base * 0.85, 12);
+  if (highWaterPnl >= 200) return Math.max(base * 0.50, 8);
+  if (highWaterPnl >= 75)  return Math.max(base * 0.55, 9);
+  if (highWaterPnl >= 35)  return Math.max(base * 0.60, 9);
+  if (highWaterPnl >= 12)  return Math.max(base * 0.60, 9); // lock the spike-fade early
   return base;
 }
 

@@ -104,6 +104,49 @@ export function allPositions(limit = 10) {
   return db.prepare('SELECT * FROM dry_run_positions ORDER BY id DESC LIMIT ?').all(limit);
 }
 
+// Re-entry cooldown: never catch the falling knife on a token you just exited. A token that
+// stopped you out is in a downtrend — re-buying it on the next signal is how a single bad
+// token turns into 4-5 losing trades. Returns cooldown info if blocked, else null.
+//   reentry_cooldown_ms       — block any re-entry within this window after a close
+//   reentry_loss_cooldown_ms  — longer block when the last exit was a loss
+export function reentryBlockedUntil(mint) {
+  const strat = activeStrategy();
+  const anyCd = Number(strat.reentry_cooldown_ms || 0);
+  const lossCd = Number(strat.reentry_loss_cooldown_ms || 0);
+  if (anyCd <= 0 && lossCd <= 0) return null;
+  const last = db.prepare(`
+    SELECT closed_at_ms, pnl_percent, exit_reason FROM dry_run_positions
+    WHERE mint = ? AND status = 'closed' AND closed_at_ms IS NOT NULL
+    ORDER BY closed_at_ms DESC LIMIT 1
+  `).get(mint);
+  if (!last || !last.closed_at_ms) return null;
+  const wasLoss = Number(last.pnl_percent || 0) <= 0;
+  const cd = wasLoss ? Math.max(anyCd, lossCd) : anyCd;
+  if (cd <= 0) return null;
+  const until = Number(last.closed_at_ms) + cd;
+  if (now() >= until) return null;
+  return { until, wasLoss, lastPnl: Number(last.pnl_percent || 0), exitReason: last.exit_reason };
+}
+
+// Consecutive-loss pause: when the last K closed trades are all losses and the most recent
+// closed within the pause window, stop opening new positions. Stops the bot from grinding
+// capital into a losing session. Naturally resets once a win lands or the window elapses.
+export function consecutiveLossPause() {
+  const strat = activeStrategy();
+  const k = Number(strat.consecutive_loss_limit || 0);
+  const pauseMs = Number(strat.consecutive_loss_pause_ms || 0);
+  if (k <= 0 || pauseMs <= 0) return false;
+  const recent = db.prepare(`
+    SELECT pnl_percent, closed_at_ms FROM dry_run_positions
+    WHERE status = 'closed' AND closed_at_ms IS NOT NULL
+    ORDER BY closed_at_ms DESC LIMIT ?
+  `).all(k);
+  if (recent.length < k) return false;
+  if (!recent.every(r => Number(r.pnl_percent || 0) <= 0)) return false;
+  const lastClose = Number(recent[0].closed_at_ms || 0);
+  return (now() - lastClose) < pauseMs;
+}
+
 export function createDryRunPosition(candidateId, candidate, decision, reason = 'llm_buy') {
   const strat = activeStrategy();
   const sizeSol = resolvePositionSizeSol(strat, decision);
