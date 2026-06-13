@@ -5,7 +5,7 @@ import { storeDecision, storeBatchDecision, logDecisionEvent } from '../db/decis
 import { buildCandidate, filterCandidate, signalLabel } from './candidateBuilder.js';
 import { decideCandidateBatch } from './llm.js';
 import { activeStrategy } from '../db/settings.js';
-import { createDryRunPosition, createLivePosition, canOpenMorePositions, openPositionCount, tradingMode, circuitBreakerTripped, dailyRealizedPnlSol } from '../db/positions.js';
+import { createDryRunPosition, createLivePosition, canOpenMorePositions, openPositionCount, tradingMode, circuitBreakerTripped, dailyRealizedPnlSol, reentryBlockedUntil, consecutiveLossPause } from '../db/positions.js';
 import { sendBatchReveal, sendTelegram, sendPositionOpen, sendTradeIntent } from '../telegram/send.js';
 import { candidateSummary } from '../telegram/format.js';
 import { createTradeIntent } from '../db/intents.js';
@@ -31,6 +31,15 @@ export async function processCandidateFromSignals(signals) {
   if (!canOpenMorePositions()) {
     const max = numSetting('max_open_positions', 3);
     console.log(`[agent] max positions reached (${openPositionCount()}/${max}), skipping ${signals.mint.slice(0, 8)}...`);
+    return;
+  }
+
+  // Re-entry cooldown — never re-buy a token we just exited (especially a loser). This is
+  // the single biggest fix for the death-spiral where one bleeding token gets bought 4-5×.
+  const cooldown = reentryBlockedUntil(signals.mint);
+  if (cooldown) {
+    const mins = Math.ceil((cooldown.until - now()) / 60000);
+    console.log(`[agent] reentry cooldown ${signals.mint.slice(0, 8)} for ${mins}m (last exit ${cooldown.lastPnl.toFixed(1)}% ${cooldown.exitReason || ''})`);
     return;
   }
 
@@ -94,7 +103,12 @@ export async function processCandidateFromSignals(signals) {
   const passesConfidence = batchDecision.verdict === 'BUY' && batchDecision.confidence >= minConfidence;
   // Circuit breaker: pause new automated entries after today's realized losses exceed the limit.
   const cbTripped = circuitBreakerTripped();
-  const willAutoBuy = selectedRow && boolSetting('agent_enabled', true) && !cbTripped && passesConfidence;
+  // Consecutive-loss pause: stop grinding capital into a losing session.
+  const lossPaused = consecutiveLossPause();
+  // The LLM may select a different token than the trigger — re-check its cooldown too.
+  const selectedCooldown = selectedRow ? reentryBlockedUntil(selectedRow.candidate.token.mint) : null;
+  const willAutoBuy = selectedRow && boolSetting('agent_enabled', true)
+    && !cbTripped && !lossPaused && !selectedCooldown && passesConfidence;
 
   // Alert (once/day) when the circuit breaker blocks a trade that would otherwise fire.
   if (cbTripped && selectedRow && boolSetting('agent_enabled', true) && passesConfidence) {
@@ -136,7 +150,8 @@ export async function processCandidateFromSignals(signals) {
     // Secondary pick — if LLM found a second exceptional candidate, try to enter it too
     const secondaryRow = batchDecision.secondary_row;
     const secondaryConf = batchDecision.secondary_confidence || 0;
-    if (secondaryRow && secondaryConf >= minConfidence && canOpenMorePositions()) {
+    if (secondaryRow && secondaryConf >= minConfidence && canOpenMorePositions()
+        && !reentryBlockedUntil(secondaryRow.candidate.token.mint)) {
       const secondaryDecision = { ...batchDecision, selected_row: secondaryRow, confidence: secondaryConf,
         selected_candidate_id: secondaryRow.id, selected_mint: secondaryRow.candidate.token.mint };
       console.log(`[agent] secondary pick: ${secondaryRow.candidate.token.mint.slice(0, 8)} conf=${secondaryConf}`);
@@ -150,6 +165,8 @@ export async function processCandidateFromSignals(signals) {
       rows,
       decision: batchDecision,
       action: cbTripped && passesConfidence ? 'entry_skipped_circuit_breaker'
+        : lossPaused && passesConfidence ? 'entry_skipped_consecutive_losses'
+        : selectedCooldown && passesConfidence ? 'entry_skipped_reentry_cooldown'
         : selectedRow ? 'entry_not_approved' : 'no_candidate_selected',
       guardrails: {
         agentEnabled: boolSetting('agent_enabled', true),
@@ -157,6 +174,8 @@ export async function processCandidateFromSignals(signals) {
         openPositions: openPositionCount(),
         maxOpenPositions: numSetting('max_open_positions', 3),
         circuitBreaker: { tripped: cbTripped, dailyPnlSol: dailyRealizedPnlSol(), limitSol: numSetting('daily_loss_limit_sol', 0.35) },
+        consecutiveLossPause: lossPaused,
+        reentryCooldown: selectedCooldown ? { mint: selectedRow.candidate.token.mint, lastPnl: selectedCooldown.lastPnl } : null,
       },
     });
   }

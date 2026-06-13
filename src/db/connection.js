@@ -437,24 +437,32 @@ export function initDb() {
     max_dev_holder_percent: 5,
     min_lp_burned_percent: 80,    // LP burn < 80% = dev can drain pool; strongest rug signal
     fee_claim_max_age_ms: 900000, // skip fee claims > 15min old — already priced in by fast wallets
-    // Conviction-weighted sizing — scale capital by LLM confidence (0.10–0.28 SOL).
+    // Re-entry control — never catch a falling knife on a token we just exited. The #1 cause
+    // of the death-spiral where one bleeding token gets bought 4-5× down its chart.
+    reentry_cooldown_ms: 7200000,        // 2h block after any exit
+    reentry_loss_cooldown_ms: 21600000,  // 6h block after a losing exit
+    consecutive_loss_limit: 4,           // pause after 4 straight losses
+    consecutive_loss_pause_ms: 3600000,  // for 1h (resets on a win)
+    // Conviction-weighted sizing — scale capital by LLM confidence (0.10–0.18 SOL).
     conviction_sizing: true,
-    position_size_sol: 0.15,      // base/mid size (used when conviction sizing is off)
+    position_size_sol: 0.12,      // base/mid size (used when conviction sizing is off)
     position_size_min_sol: 0.10,
-    position_size_max_sol: 0.28,  // wider max for 3-way confirmed, high-fee signals
+    position_size_max_sol: 0.18,  // capped while the no-runner regime persists
     max_open_positions: 6,
-    tp_percent: 20,               // trail arms at +20% — captures mid-runners that peak +25-40%
-    sl_percent: -18,
+    // Exit engine tuned for a spike-and-fade market (tokens peak +25-35% then dump):
+    // arm the trail early and clamp it tight to lock the spike instead of riding to SL.
+    tp_percent: 12,               // trail arms at +12% — catches the fade before it reverses
+    sl_percent: -15,              // tighter floor — cut bleeders faster
     trailing_enabled: true,
     trailing_from_entry: false,
-    trailing_percent: 15,         // tiered tightens to 8% at +500%
+    trailing_percent: 15,         // tiered clamps to 9% once up +12%, 8% for rare runners
     tiered_trailing: true,
     partial_tp: true,
-    partial_tp_at_percent: 60,    // PT1 at +60% — ~35% of entries peak here; lock profit sooner
-    partial_tp_sell_percent: 35,
+    partial_tp_at_percent: 25,    // PT1 at +25% — the level tokens actually reach; bank it
+    partial_tp_sell_percent: 40,
     partial_tp_2: true,
-    partial_tp_2_at_percent: 200, // PT2 at +200% — more reachable than 250% for runners
-    partial_tp_2_sell_percent: 20,
+    partial_tp_2_at_percent: 80,  // PT2 at +80% — secures a strong move before it fades
+    partial_tp_2_sell_percent: 25,
     max_hold_ms: 14400000,        // 4h (winners that hit PT1 get 6h via 1.5× extension)
     use_llm: true,
     llm_min_confidence: 65,
@@ -681,6 +689,33 @@ function migrateStrategyConfigs() {
       });
       moonChanged = true;
       console.log('[db] moon_bag migrated: expert improvements (trail@+20%, PT1 60%/35%, LP burn 80%, fee age 15min, max size 0.28)');
+    }
+
+    // Migration 8: live dry-run recalibration. 50 trades over 24h lost -0.39 SOL because
+    // (1) the bot re-bought the same bleeding token 4-5× down its chart, (2) the 15% trail
+    // didn't tighten until +40% so spike-and-fade tokens (peak +25-35%) gave it all back,
+    // and (3) the market has no runners, so the +60% partial TP never fired. This retunes
+    // for the spike-fade regime + adds re-entry cooldowns. Detected by missing reentry_cooldown_ms.
+    if (cfg.reentry_cooldown_ms == null) {
+      Object.assign(cfg, {
+        // Re-entry control — kills the falling-knife death-spiral
+        reentry_cooldown_ms: 7200000,
+        reentry_loss_cooldown_ms: 21600000,
+        consecutive_loss_limit: 4,
+        consecutive_loss_pause_ms: 3600000,
+        // Spike-fade exit engine — arm early, clamp tight, lock the spike
+        tp_percent: 12,
+        sl_percent: -15,
+        partial_tp_at_percent: 25,
+        partial_tp_sell_percent: 40,
+        partial_tp_2_at_percent: 80,
+        partial_tp_2_sell_percent: 25,
+        // De-risk sizing while the regime is unproven
+        position_size_sol: cfg.position_size_sol > 0.12 ? 0.12 : cfg.position_size_sol,
+        position_size_max_sol: 0.18,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: spike-fade retune + re-entry cooldowns (trail@+12%, PT1 25%/40%, SL -15%, no rebuy 2-6h)');
     }
 
     if (moonChanged) {
