@@ -470,6 +470,91 @@ export function initDb() {
     sell_slippage_bps: 1000,
   }), ts);
 
+  // El-Ponyin — inspired by ponyin.id "Should I Ape?" decision engine.
+  // Five-layer on-chain filter: (1) contract security, (2) bundle integrity, (3) volume
+  // integrity / wash-trade detection, (4) marketing timing, (5) technical dip confirmation.
+  // Only enters when price has pulled back 5-20% from its recent peak — buying the dip on
+  // a token that already proved it can move. Tighter SL (-12%) because entry is confirmed,
+  // wider trail arm (+20%) because the initial pump has passed. Higher per-trade conviction
+  // (0.14 SOL base) with fewer concurrent positions (4 max).
+  stratInsert.run('el_ponyin', 'El-Ponyin', 0, JSON.stringify({
+    entry_mode: 'immediate',
+    min_source_count: 2,
+    require_fee_claim: true,
+    token_age_max_ms: 7200000,         // 2h — only fresh tokens
+    min_mcap_usd: 10000,
+    max_mcap_usd: 180000,
+    min_fee_claim_sol: 0.5,
+    min_gmgn_total_fee_sol: 5,
+
+    // Layer 1: Contract Security (tighter than Moon Bag)
+    require_mint_revoked: true,
+    require_freeze_revoked: true,
+    max_dev_holder_percent: 3,         // dev must hold ≤3% (was 5% in Moon Bag)
+    min_lp_burned_percent: 90,         // LP must be 90%+ burned (was 80%)
+
+    // Layer 2: Bundle Integrity
+    min_holders: 75,
+    max_top20_holder_percent: 50,      // tighter concentration limit
+    trending_max_bundler_rate: 0.20,   // much tighter (Moon Bag: 0.45)
+    trending_max_rug_ratio: 0.20,
+
+    // Layer 3: Volume Integrity — organic activity proxy
+    // Wash-traded tokens have very high volume with few real holders (low swaps/holder).
+    min_swaps_per_holder: 1.5,         // at least 1.5 swaps per unique holder (organic)
+
+    // Layer 4: Marketing Timing — signal must be very fresh
+    fee_claim_max_age_ms: 600000,      // 10min max age (Moon Bag: 15min)
+    trending_min_volume_usd: 5000,
+    trending_min_swaps: 75,
+    min_liquidity_usd: 8000,
+
+    // Layer 5: Technical Dip Confirmation — buy the pullback, not the peak
+    // Token must be 5-20% below its recent ATH (has dipped, but hasn't collapsed).
+    max_ath_distance_pct: -5,          // must be at least 5% off peak (dip started)
+    min_ath_distance_pct: -20,         // can't be more than 20% below peak (not dying)
+
+    // SIA composite score gate (0-100 across all 5 layers) — minimum to enter
+    sia_min_score: 60,
+
+    // Re-entry control — longer cooldowns than Moon Bag (higher standards, slower recycling)
+    reentry_cooldown_ms: 10800000,       // 3h block after any exit
+    reentry_loss_cooldown_ms: 28800000,  // 8h block after a losing exit
+    consecutive_loss_limit: 3,           // pause after 3 straight losses (stricter)
+    consecutive_loss_pause_ms: 7200000,  // 2h pause
+
+    // Conviction sizing — scale by LLM confidence (higher base than Moon Bag)
+    conviction_sizing: true,
+    position_size_sol: 0.14,
+    position_size_min_sol: 0.10,
+    position_size_max_sol: 0.22,
+    max_open_positions: 4,             // fewer concurrent positions — higher conviction only
+
+    // Exit engine tuned for dip-entry: we entered after the spike, so the next move
+    // is the real pump. Give it room (+20% arm), lock it tight when it runs.
+    tp_percent: 20,                    // trail arms at +20% (confirmed dip = more runway)
+    sl_percent: -12,                   // tighter SL (entry is confirmed, limit the downside)
+    trailing_enabled: true,
+    trailing_from_entry: false,
+    trailing_percent: 15,
+    tiered_trailing: true,
+    partial_tp: true,
+    partial_tp_at_percent: 40,         // PT1 at +40% (higher bar — better entry basis)
+    partial_tp_sell_percent: 35,
+    partial_tp_2: true,
+    partial_tp_2_at_percent: 120,      // PT2 at +120%
+    partial_tp_2_sell_percent: 30,
+    max_hold_ms: 10800000,             // 3h (dip plays resolve faster than cold entries)
+    use_llm: true,
+    llm_min_confidence: 70,            // higher LLM bar (more selective)
+    buy_slippage_bps: 300,
+    sell_slippage_bps: 1000,
+    min_saved_wallet_holders: 0,
+    min_graduated_volume_usd: 0,
+    min_hot_level: 0,
+    min_smart_degen_count: 0,
+  }), ts);
+
   // Momentum Rocket — catches hot trending tokens with smart-money accumulation.
   // Uses trailing_from_entry so there is no fixed exit — just follows the momentum.
   // Tight entry filters ensure quality; tiered trailing locks in gains progressively.
@@ -525,6 +610,7 @@ const SLIPPAGE_DEFAULTS = {
   degen:            { buy_slippage_bps: 500,  sell_slippage_bps: 1500 },
   moon_bag:         { buy_slippage_bps: 300,  sell_slippage_bps: 1000 },
   momentum_rocket:  { buy_slippage_bps: 500,  sell_slippage_bps: 1000 },
+  el_ponyin:        { buy_slippage_bps: 300,  sell_slippage_bps: 1000 },
 };
 
 // Patch existing strategy configs in the DB if they still carry old restrictive values.
