@@ -119,11 +119,19 @@ export function filterCandidate(candidate) {
     failures.push(`saved wallet holders: ${savedCount} < ${strat.min_saved_wallet_holders}`);
   }
 
-  // ATH distance (dip buy strategy)
+  // ATH distance — minimum dip required (e.g. max_ath_distance_pct: -5 = must be ≥5% below ATH)
   if (strat.max_ath_distance_pct < 0) {
     const athDist = candidate.chart?.distanceFromAthPercent;
     if (athDist != null && athDist > strat.max_ath_distance_pct) {
-      failures.push(`ATH distance: ${athDist.toFixed(0)}% > target ${strat.max_ath_distance_pct}%`);
+      failures.push(`ATH distance: ${athDist.toFixed(0)}% > target ${strat.max_ath_distance_pct}% (not dipped enough yet)`);
+    }
+  }
+
+  // ATH distance ceiling — cap how deep the dip can be (e.g. min_ath_distance_pct: -20 = must be ≤20% below ATH)
+  if (strat.min_ath_distance_pct != null && Number(strat.min_ath_distance_pct) < 0) {
+    const athDist = candidate.chart?.distanceFromAthPercent;
+    if (athDist != null && athDist < Number(strat.min_ath_distance_pct)) {
+      failures.push(`ATH distance too deep: ${athDist.toFixed(0)}% < floor ${strat.min_ath_distance_pct}% (token declining)`);
     }
   }
 
@@ -154,7 +162,86 @@ export function filterCandidate(candidate) {
     }
   }
 
+  // El-Ponyin Layer 3: Volume integrity — organic swaps-per-holder ratio.
+  // Wash-traded tokens inflate volume with a small cluster of coordinated wallets.
+  // A healthy token has ≥1.5 swaps per unique holder (real community activity).
+  if (strat.min_swaps_per_holder > 0) {
+    const swapsPerHolder = trendingSwaps / Math.max(1, holderCount);
+    if (swapsPerHolder < strat.min_swaps_per_holder) {
+      failures.push(`volume integrity: ${swapsPerHolder.toFixed(1)} swaps/holder < min ${strat.min_swaps_per_holder} (possible wash trading)`);
+    }
+  }
+
+  // El-Ponyin SIA composite score — 5-layer 0-100 score matching ponyin.id's "Should I Ape?" engine.
+  // Each layer scores 0-20 pts; minimum sia_min_score required to proceed.
+  if (strat.sia_min_score > 0) {
+    const siaScore = computeSIAScore(candidate, strat);
+    candidate.siaScore = siaScore;
+    if (siaScore < strat.sia_min_score) {
+      failures.push(`SIA score: ${siaScore}/100 < min ${strat.sia_min_score} (5-layer filter)`);
+    }
+  }
+
   return { passed: failures.length === 0, failures, strategy: strat.id };
+}
+
+// Ponyin.id "Should I Ape?" — composite on-chain score across 5 layers (0-100).
+// Layer 1 (Contract Security): mint/freeze revoked, LP burned, dev holdings.
+// Layer 2 (Bundle Integrity): bundler rate, top holder concentration.
+// Layer 3 (Volume Integrity): organic swap density, rug ratio.
+// Layer 4 (Marketing Timing): fee claim freshness.
+// Layer 5 (Dip Confirmation): price distance from recent ATH.
+function computeSIAScore(candidate, strat) {
+  const audit = candidate.audit || {};
+  let score = 0;
+
+  // Layer 1: Contract Security (0-20 pts)
+  if (audit.mintAuthorityDisabled !== false) score += 5;
+  if (audit.freezeAuthorityDisabled !== false) score += 5;
+  const lpBurned = Number(audit.lpBurnedPercent ?? 0);
+  if (lpBurned >= 90) score += 7;
+  else if (lpBurned >= 80) score += 4;
+  else if (lpBurned >= 50) score += 2;
+  const devPct = Number(audit.devBalancePercent ?? 0);
+  if (devPct <= 2) score += 3;
+  else if (devPct <= 5) score += 1;
+
+  // Layer 2: Bundle Integrity (0-20 pts)
+  const bundlerRate = Number(candidate.trending?.bundler_rate ?? 1);
+  if (bundlerRate <= 0.10) score += 20;
+  else if (bundlerRate <= 0.20) score += 14;
+  else if (bundlerRate <= 0.35) score += 7;
+  else if (bundlerRate <= 0.45) score += 3;
+
+  // Layer 3: Volume Integrity (0-20 pts)
+  const holderCount = Number(candidate.metrics.holderCount || 1);
+  const trendingSwaps = Number(candidate.trending?.swaps ?? 0);
+  const swapsPerHolder = trendingSwaps / Math.max(1, holderCount);
+  if (swapsPerHolder >= 3)  score += 10;
+  else if (swapsPerHolder >= 1.5) score += 6;
+  else if (swapsPerHolder >= 0.5) score += 2;
+  const rugRatio = Number(candidate.trending?.rug_ratio ?? 1);
+  if (rugRatio <= 0.10) score += 10;
+  else if (rugRatio <= 0.20) score += 6;
+  else if (rugRatio <= 0.30) score += 2;
+
+  // Layer 4: Marketing Timing (0-20 pts) — fee claim freshness
+  const feeAgeMins = candidate.feeClaim
+    ? (Date.now() - (candidate.feeClaim.receivedAtMs || Date.now())) / 60000
+    : 999;
+  if (feeAgeMins <= 3)  score += 20;
+  else if (feeAgeMins <= 7)  score += 14;
+  else if (feeAgeMins <= 10) score += 8;
+  else if (feeAgeMins <= 15) score += 3;
+
+  // Layer 5: Dip Confirmation (0-20 pts) — sweet spot 5-15% below recent ATH
+  const athDist = Number(candidate.chart?.distanceFromAthPercent ?? 0);
+  if (athDist >= -15 && athDist <= -5)  score += 20; // ideal dip zone
+  else if (athDist >= -20 && athDist < -5)  score += 12; // deeper dip, still ok
+  else if (athDist > -5 && athDist >= -2)   score += 5;  // near ATH, less ideal entry
+  else if (athDist < -20)                   score += 2;  // too deep — may be declining
+
+  return Math.min(100, score);
 }
 
 export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, route }) {
