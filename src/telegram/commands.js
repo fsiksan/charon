@@ -48,7 +48,7 @@ export async function handleMessage(msg) {
     if (!id) {
       return bot.sendMessage(chatId, strategyMenuText(), { parse_mode: 'HTML', ...strategyKeyboard() });
     }
-    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen', 'moon_bag', 'momentum_rocket'];
+    const valid = ['sniper', 'dip_buy', 'smart_money', 'degen', 'moon_bag', 'momentum_rocket', 'el_ponyin'];
     if (!valid.includes(id)) {
       return bot.sendMessage(chatId, `Unknown strategy. Valid: ${valid.join(', ')}`);
     }
@@ -372,7 +372,7 @@ export async function sendHealth(chatId) {
     ...(todaySignals.n === 0 ? ['  ⚠ No signals at all → signal server may be down or market is very slow'] : []),
     ...(recentActions.length > 0 ? [`\n<b>Decision actions today:</b>\n` + recentActions.map(a => `  ${a.action}: ${a.n}×`).join('\n')] : []),
     '',
-    `<b>Strategy filter gates (Moon Bag):</b>`,
+    `<b>Strategy filter gates (${strat.name || strat.id}):</b>`,
     `  require_fee_claim: ${strat.require_fee_claim}`,
     `  min_source_count : ${strat.min_source_count}`,
     `  min_fee_claim_sol: ${strat.min_fee_claim_sol} SOL`,

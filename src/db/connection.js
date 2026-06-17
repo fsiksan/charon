@@ -804,8 +804,40 @@ function migrateStrategyConfigs() {
       console.log('[db] moon_bag migrated: spike-fade retune + re-entry cooldowns (trail@+12%, PT1 25%/40%, SL -15%, no rebuy 2-6h)');
     }
 
+    // Migration 9: entry quality fix. Analysis of 267 dry-run trades (33.3% WR) showed
+    // the win rate is 3.6pp below break-even. The bundler_rate cap (0.45) was too loose —
+    // developer-bundled launches (bundler 25-45%) almost always dump immediately. Adding a
+    // light organic-activity check (swaps/holder) screens wash-traded volume. Tightening
+    // fee claim age by 3 more minutes removes signals that are already priced in.
+    // NOTE: tp_percent stays at 12 — ghost trail exits at ~-3% are BETTER than letting
+    // these tokens drift to the -15% SL; they are damage-control, not a problem.
+    // Detected by absence of min_swaps_per_holder (the new param added in this migration).
+    if (cfg.min_swaps_per_holder == null) {
+      Object.assign(cfg, {
+        trending_max_bundler_rate: 0.25,  // was 0.45 — developer-bundled launches almost always dump
+        min_swaps_per_holder: 0.8,        // ≥0.8 swaps per unique holder — filters wash-traded volume
+        fee_claim_max_age_ms: 720000,     // 12min (was 15min) — fresher signals, less priced-in
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: win-rate fix (bundler 0.45→0.25, swaps/holder ≥0.8, fee age 12min)');
+    }
+
     if (moonChanged) {
       db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'moon_bag'").run(JSON.stringify(cfg));
+    }
+  }
+
+  // El-Ponyin: relax token age window so dual-confirmed signals can reach the orchestrator.
+  // At 2h (initial seed), slow-market days produce 0 entries — Moon Bag ran fine at 2.5h.
+  // 3h still preserves the "fresh token" philosophy and gives the dip-confirmation filter
+  // enough time to observe the post-pump pullback. Detected by exact seed value 7200000.
+  const epRow = db.prepare("SELECT config_json FROM strategies WHERE id = 'el_ponyin'").get();
+  if (epRow) {
+    const epCfg = JSON.parse(epRow.config_json);
+    if (Number(epCfg.token_age_max_ms) === 7200000) {
+      epCfg.token_age_max_ms = 10800000;  // 2h → 3h
+      db.prepare("UPDATE strategies SET config_json = ? WHERE id = 'el_ponyin'").run(JSON.stringify(epCfg));
+      console.log('[db] el_ponyin migrated: token_age_max 2h → 3h (wider dual-signal window)');
     }
   }
 
