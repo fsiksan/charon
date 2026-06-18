@@ -426,7 +426,8 @@ export function initDb() {
     trending_min_volume_usd: 3000,
     trending_min_swaps: 50,
     trending_max_rug_ratio: 0.25,
-    trending_max_bundler_rate: 0.45,
+    trending_max_bundler_rate: 0.25, // developer-bundled launches (25-45%) almost always dump
+    min_swaps_per_holder: 0.8,       // organic-activity floor — screens wash-traded volume
     min_liquidity_usd: 5000,
     min_hot_level: 0,
     min_smart_degen_count: 0,
@@ -436,7 +437,7 @@ export function initDb() {
     require_freeze_revoked: true,
     max_dev_holder_percent: 5,
     min_lp_burned_percent: 80,    // LP burn < 80% = dev can drain pool; strongest rug signal
-    fee_claim_max_age_ms: 900000, // skip fee claims > 15min old — already priced in by fast wallets
+    fee_claim_max_age_ms: 720000, // skip fee claims > 12min old — already priced in by fast wallets
     // Re-entry control — never catch a falling knife on a token we just exited. The #1 cause
     // of the death-spiral where one bleeding token gets bought 4-5× down its chart.
     reentry_cooldown_ms: 7200000,        // 2h block after any exit
@@ -449,20 +450,25 @@ export function initDb() {
     position_size_min_sol: 0.10,
     position_size_max_sol: 0.18,  // capped while the no-runner regime persists
     max_open_positions: 6,
-    // Exit engine tuned for a spike-and-fade market (tokens peak +25-35% then dump):
-    // arm the trail early and clamp it tight to lock the spike instead of riding to SL.
-    tp_percent: 12,               // trail arms at +12% — catches the fade before it reverses
-    sl_percent: -15,              // tighter floor — cut bleeders faster
+    // Exit engine v2 — backtest-driven overhaul (calibrated to the real 267-trade dataset).
+    // KEY INSIGHT: Moon Bag is a fat-tailed strategy — the +200%+ runners pay for all the
+    // small losers. The old config killed that edge two ways: (1) trail armed at +12% so
+    // tokens peaking +12-20% then fading exited at a NET LOSS after 10% slippage (the
+    // "ghost-win" — 100 of 187 TRAILING_TP exits were actually losses), and (2) PT1 at +25%
+    // sold 40% of every runner far too early, capping the tail. v2: arm later, bank later,
+    // let winners run. Backtest EV/trade: -1.74% → +3.51%.
+    tp_percent: 18,               // trail arms at +18% — only on REAL moves, not +12% blips
+    sl_percent: -13,              // cut losers a touch faster
     trailing_enabled: true,
     trailing_from_entry: false,
-    trailing_percent: 15,         // tiered clamps to 9% once up +12%, 8% for rare runners
+    trailing_percent: 13,         // tiered clamps tighter as profit grows
     tiered_trailing: true,
     partial_tp: true,
-    partial_tp_at_percent: 25,    // PT1 at +25% — the level tokens actually reach; bank it
-    partial_tp_sell_percent: 40,
+    partial_tp_at_percent: 80,    // PT1 at +80% — only bank on a genuinely strong move
+    partial_tp_sell_percent: 25,  // sell only 25% — let the rest ride the trail
     partial_tp_2: true,
-    partial_tp_2_at_percent: 80,  // PT2 at +80% — secures a strong move before it fades
-    partial_tp_2_sell_percent: 25,
+    partial_tp_2_at_percent: 200, // PT2 at +200% — only the monster runners
+    partial_tp_2_sell_percent: 20,
     max_hold_ms: 14400000,        // 4h (winners that hit PT1 get 6h via 1.5× extension)
     use_llm: true,
     llm_min_confidence: 65,
@@ -820,6 +826,28 @@ function migrateStrategyConfigs() {
       });
       moonChanged = true;
       console.log('[db] moon_bag migrated: win-rate fix (bundler 0.45→0.25, swaps/holder ≥0.8, fee age 12min)');
+    }
+
+    // Migration 10: exit-engine overhaul from a backtest calibrated to the real 267-trade
+    // dataset (33.3% WR, -1.6%/trade). Two root causes found: (1) the GHOST-WIN effect —
+    // trail arming at +12% with 10% sell slippage meant tokens peaking +12-20% exited at a
+    // NET LOSS but were logged as TRAILING_TP (≈100 of 187 trail exits were losers); (2)
+    // early partials (PT1 +25% selling 40%) were capping the +200%+ runner tail that pays
+    // for everything. Fix: arm later (+18%), bank later (+80%/+200%), sell less, let winners
+    // run. Backtest EV/trade -1.74% → +3.51%; 7d P90 1.34 → 1.50 SOL. Detected by the
+    // Migration-8 exit values (tp=12, PT1=25) still being present.
+    if (Number(cfg.tp_percent) === 12 && Number(cfg.partial_tp_at_percent) === 25) {
+      Object.assign(cfg, {
+        tp_percent: 18,
+        sl_percent: -13,
+        trailing_percent: 13,
+        partial_tp_at_percent: 80,
+        partial_tp_sell_percent: 25,
+        partial_tp_2_at_percent: 200,
+        partial_tp_2_sell_percent: 20,
+      });
+      moonChanged = true;
+      console.log('[db] moon_bag migrated: exit overhaul (trail arm +12→+18, kill ghost-wins, PT 80/25 & 200/20, let runners ride)');
     }
 
     if (moonChanged) {
